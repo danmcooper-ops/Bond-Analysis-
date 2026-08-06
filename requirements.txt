@@ -1,0 +1,17 @@
+# Complete, unlike the equity repo's (which omits numpy/requests/curl_cffi and
+# is missing scipy that its imports assume). Keep this file honest: every
+# top-level import in data/, models/, scripts/ must appear here.
+pandas
+numpy
+pyarrow
+requests
+lxml
+jinja2
+openpyxl
+yfinance
+curl_cffi
+pytest
+
+# Deliberately NOT scipy. models/solver.py hand-rolls Brent + Newton (~60
+# lines) so root-finding is testable and can honour the "return None, never
+# raise" contract the pipeline depends on.

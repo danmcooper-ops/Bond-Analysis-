@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Run artifacts — the accumulating snapshot corpus lives here, never in git.
+output/
+
+# Published report; tracked only on the `pages-live` branch.
+docs/
+
+# API caches (N-PORT quarterly parquet, FRED series, Treasury curves)
+data/cache/
+
+.env
+.DS_Store
