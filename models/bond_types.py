@@ -109,7 +109,17 @@ def from_row(row, settle=None):
     if not is_analyzable(coupon_type=row.get('coupon_type'),
                          is_convertible=bool(row.get('is_convertible')),
                          coupon_rate=coupon):
-        return None, 'not fixed-rate (floater or convertible)'
+        # Name the actual cause: these get aggregated into a drop report, and
+        # "not fixed-rate" over a pile of TIPS reads as a parsing failure
+        # rather than the deliberate exclusion it is.
+        if row.get('is_inflation_linked'):
+            return None, 'inflation-linked (no real-rate curve to price it)'
+        if row.get('is_convertible'):
+            return None, 'convertible (equity option dominates)'
+        ctype = (row.get('coupon_type') or '').strip()
+        if ctype and ctype.lower() != 'fixed':
+            return None, f'not fixed-rate ({ctype.lower()})'
+        return None, 'implausible coupon for a fixed-rate bond'
 
     asset_class = (row.get('asset_class')
                    or classify_by_cusip(cusip)

@@ -79,8 +79,10 @@ def test_maturity_date_parsing(value, expected):
     ({'annualized_rate': None}, 'coupon'),
     ({'annualized_rate': 'n/a'}, 'coupon'),
     ({'annualized_rate': 95.0}, 'coupon'),           # 95% coupon: bad data
-    ({'coupon_type': 'Floating'}, 'fixed-rate'),
-    ({'is_convertible': True}, 'fixed-rate'),
+    ({'coupon_type': 'Floating'}, 'not fixed-rate'),
+    ({'is_convertible': True}, 'convertible'),
+    ({'coupon_type': 'Inflation-Linked', 'is_inflation_linked': True},
+     'inflation-linked'),
 ])
 def test_bad_rows_are_rejected_with_a_reason(overrides, fragment):
     bond, reason = from_row(_row(**overrides), settle=SETTLE)
@@ -88,12 +90,23 @@ def test_bad_rows_are_rejected_with_a_reason(overrides, fragment):
     assert fragment in reason
 
 
+def test_rejection_reasons_name_the_actual_cause():
+    """These aggregate into a per-run drop report. A pile of TIPS reported as
+    'not fixed-rate' reads as a parsing failure rather than the deliberate
+    exclusion it is."""
+    assert 'floating' in from_row(_row(coupon_type='Floating'), SETTLE)[1]
+    assert 'convertible' in from_row(_row(is_convertible=True), SETTLE)[1]
+    assert 'inflation-linked' in from_row(
+        _row(coupon_type='Inflation-Linked', is_inflation_linked=True),
+        SETTLE)[1]
+
+
 def test_floaters_are_rejected_rather_than_mispriced():
     """A floater's YTM is undefined without projecting a forward index.
     Feeding it through the fixed-rate machinery would produce a
     confident-looking wrong number."""
     bond, reason = from_row(_row(coupon_type='Floating'), SETTLE)
-    assert bond is None and 'floater' in reason
+    assert bond is None and 'not fixed-rate' in reason
 
 
 # ---------------------------------------------------------------------------
