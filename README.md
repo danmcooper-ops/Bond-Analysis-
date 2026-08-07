@@ -45,6 +45,20 @@ For a buyer holding individual bonds to maturity — where "is this issuer's
 coverage deteriorating, and am I paid for the risk" matters far more than a
 60-day-stale mark — that is a useful trade.
 
+## The report
+
+Every run renders a single self-contained HTML page — no external requests, so
+it works from a file, from Pages, or from an attachment:
+
+```bash
+python scripts/report_html.py            # newest run -> output/bond_analysis_*.html
+python scripts/publish.py                # -> the pages-live branch -> GitHub Pages
+```
+
+Sortable and filterable across all ~9,000 instruments, with the yield curve,
+the fitted spread term structure, the rating distribution, and — at the top,
+not in a footnote — what the model cannot do.
+
 ## Quick start
 
 ```bash
