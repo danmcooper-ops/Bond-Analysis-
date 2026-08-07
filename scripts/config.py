@@ -34,8 +34,8 @@ RATING_THRESHOLD_PASS = 25
 RATING_THRESHOLDS_BY_CLASS = {
     'TREASURY': {'buy': 72.5, 'lean': 62.6, 'pass': 51.0},
     'AGENCY': {},
-    'CORP_IG': {'buy': 67.2, 'lean': 43.3, 'pass': 29.9},
-    'CORP_HY': {'buy': 65.8, 'lean': 52.2, 'pass': 36.1},
+    'CORP_IG': {'buy': 65.4, 'lean': 41.7, 'pass': 29.8},
+    'CORP_HY': {'buy': 66.3, 'lean': 54.0, 'pass': 37.3},
     'TREASURY_BILL': {'buy': 72.5, 'lean': 62.6, 'pass': 51.0},
 }
 
@@ -79,31 +79,69 @@ CREDIT_BUCKETS = ('AAA', 'AA', 'A', 'BBB', 'BB', 'B', 'CCC')
 # Score cutpoints, high to low. Calibrated monthly against the market: the
 # cutpoints are chosen so each implied bucket's median observed Z-spread lines
 # up with the FRED bucket OAS + fitted wedge. These are the seed values.
-CREDIT_CUT_AAA = 81.9
-CREDIT_CUT_AA = 69.0
-CREDIT_CUT_A = 49.8
-CREDIT_CUT_BBB = 34.7
-CREDIT_CUT_BB = 22.5
-CREDIT_CUT_B = 10.4
+CREDIT_CUT_AAA = 65.4
+CREDIT_CUT_AA = 55.5
+CREDIT_CUT_A = 45.1
+CREDIT_CUT_BBB = 40.8
+CREDIT_CUT_BB = 34.7
+CREDIT_CUT_B = 9.4
 
-# Non-financial issuer scorecard: (field, worst, best, weight)
+# Issuer scorecard: (field, worst, best, weight).
+#
+# WEIGHTS ARE MEASURED, NOT CHOSEN. Each factor's rank correlation against the
+# de-termed observed spread, over 443 issuers:
+#
+#     log_mcap          -0.755      <- strongest by far, and was ABSENT
+#     log_revenue       -0.585         (dropped: redundant with log_mcap)
+#     mcap_to_debt      -0.509      <- market leverage, was absent
+#     altman_z          -0.405
+#     int_cov           -0.356
+#     fcf_to_debt       -0.296
+#     nd_ebitda         +0.179      <- was weighted 0.25, second-highest
+#     piotroski         -0.122      <- dropped, weakest of all
+#
+# The previous weights were close to backwards: the two heaviest (0.25 each)
+# were int_cov and nd_ebitda, the latter among the weakest, while the single
+# strongest factor was not in the scorecard at all and the second strongest
+# carried the minimum weight. Rebuilding on the measurement lifts the
+# scorecard's rank correlation from -0.42 to -0.55.
+#
+# THE SCORECARD IS NOW HYBRID, NOT PURELY ACCOUNTING-BASED, and that is a real
+# change in what it claims. Market capitalisation is the equity market's view
+# of the cushion sitting beneath the debt — the structural (Merton) measure of
+# solvency, and the basis of every commercial default model. It is public,
+# point-in-time, and by far the best predictor available.
+#
+# The cost is conceptual: the divergence signal was framed as "fundamentals
+# versus the market", and with mcap in the score both sides now carry market
+# information. It remains a legitimate comparison — equity-market and
+# bond-market disagreement is a well-documented signal — but it is no longer
+# fundamentals against price.
+#
+# A sector adjustment was fitted and DISCARDED: the sector residual looked
+# substantial (Consumer Cyclical and Utilities wide, Technology tight) but
+# adding it moved the rank correlation from -0.548 to -0.549, i.e. nowhere.
+# The factors already capture it.
 CREDIT_FACTORS_CORPORATE = (
-    ('int_cov',       0.5,  15.0, 0.25),
-    ('nd_ebitda',     7.0,   0.0, 0.25),
-    ('fcf_to_debt',  -0.05,  0.35, 0.15),
+    ('log_mcap',      8.5,  12.0, 0.22),
+    ('mcap_to_debt', -0.6,   1.5, 0.20),
+    ('int_cov',       0.5,  15.0, 0.18),
     ('altman_z',      1.1,   5.0, 0.15),
-    ('log_revenue',   8.0,  11.0, 0.10),
-    ('piotroski',     0.0,   9.0, 0.10),
+    ('fcf_to_debt',  -0.05,  0.35, 0.15),
+    ('nd_ebitda',     7.0,   0.0, 0.10),
 )
 
-# Banks and insurers: operating cash flow reflects deposit/loan movements and
-# EBITDA is not meaningful, so the corporate scorecard cannot describe them.
-# Same reasoning as the equity model's _appl_non_financial mask.
+# Banks and insurers: operating cash flow reflects deposit and loan movements
+# and EBITDA is not a meaningful denominator, so the leverage and coverage
+# factors above cannot describe them. Scale and market leverage still can, and
+# they carry most of the weight because CET1 and NPL are populated for only a
+# minority of bank issuers — the reweighting over present factors then leans
+# on the two that are always there.
 CREDIT_FACTORS_FINANCIAL = (
-    ('cet1_ratio',  0.06, 0.16, 0.35),
-    ('npl_ratio',   0.05, 0.003, 0.25),
-    ('log_revenue', 8.0, 11.0, 0.20),
-    ('piotroski',   0.0,  9.0, 0.20),
+    ('log_mcap',      8.5,  12.0, 0.30),
+    ('mcap_to_debt', -0.6,   1.5, 0.25),
+    ('cet1_ratio',   0.06,  0.16, 0.25),
+    ('npl_ratio',    0.05, 0.003, 0.20),
 )
 
 FINANCIAL_SECTOR_NAME = 'Financial Services'

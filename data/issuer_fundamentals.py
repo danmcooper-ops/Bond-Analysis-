@@ -274,7 +274,7 @@ class IssuerFundamentals:
 
         for field in ('int_cov', 'nd_ebitda', 'altman_z', 'altman_z_zone',
                       'piotroski', 'revenue', 'debt_maturity_wall_yrs',
-                      'cet1_ratio', 'npl_ratio'):
+                      'cet1_ratio', 'npl_ratio', 'mcap', 'fcf'):
             row[f'issuer_{field}'] = entry.get(field)
 
         # FCF-to-debt is the scorecard's cash-generation factor and is derived

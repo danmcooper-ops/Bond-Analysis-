@@ -275,6 +275,7 @@ def signals_at(row, pit, params):
              'piotroski': entry.get('piotroski'),
              'cet1_ratio': entry.get('cet1_ratio'),
              'npl_ratio': entry.get('npl_ratio'),
+             'mcap': entry.get('mcap'),
              'sector': entry.get('sector')},
             sector=entry.get('sector'), params=params)
         bucket = result.get('bucket')

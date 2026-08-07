@@ -62,7 +62,7 @@ MIN_FACTOR_COVERAGE = 0.50
 
 
 def _factor_value(field, fundamentals):
-    """Read one scorecard input, deriving the two that are not stored."""
+    """Read one scorecard input, deriving those that are not stored directly."""
     if field == 'fcf_to_debt':
         fcf, debt = fundamentals.get('fcf'), fundamentals.get('total_debt')
         if fcf is None or not debt or debt <= 0:
@@ -73,6 +73,22 @@ def _factor_value(field, fundamentals):
         if revenue is None or revenue <= 0:
             return None
         return math.log10(revenue)
+    if field == 'log_mcap':
+        mcap = fundamentals.get('mcap')
+        if mcap is None or mcap <= 0:
+            return None
+        return math.log10(mcap)
+    if field == 'mcap_to_debt':
+        # The structural (Merton) leverage measure: how much equity cushion
+        # sits above the debt, at market value rather than book. Logged
+        # because the ratio spans several orders of magnitude — a debt-free
+        # issuer and a barely-solvent one are not two points on a linear
+        # scale. A debt-free issuer has no leverage story at all rather than
+        # an infinitely good one, so it returns None.
+        mcap, debt = fundamentals.get('mcap'), fundamentals.get('total_debt')
+        if mcap is None or debt is None or mcap <= 0 or debt <= 0:
+            return None
+        return math.log10(mcap / debt)
     return fundamentals.get(field)
 
 

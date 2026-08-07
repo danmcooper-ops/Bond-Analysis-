@@ -575,3 +575,69 @@ def test_thin_buckets_are_omitted_not_fitted():
              'years_to_maturity': 5.0}] * 3
     fitted = fit_bucket_anchors(rows, min_per_bucket=50)
     assert 'CCC' not in fitted
+
+
+# ---------------------------------------------------------------------------
+# Scorecard inputs
+# ---------------------------------------------------------------------------
+
+def test_scorecard_uses_the_factors_that_actually_predict():
+    """Weights are measured, not chosen. Rank correlation against de-termed
+    observed spread over 443 issuers put log_mcap at -0.755 and nd_ebitda at
+    +0.179 — yet the old scorecard gave nd_ebitda 0.25 and had no mcap term
+    at all."""
+    from scripts.config import CREDIT_FACTORS_CORPORATE
+    weights = {f: w for f, _, _, w in CREDIT_FACTORS_CORPORATE}
+    assert 'log_mcap' in weights and 'mcap_to_debt' in weights
+    assert weights['log_mcap'] > weights['nd_ebitda']
+    assert 'piotroski' not in weights          # -0.122, the weakest
+    assert abs(sum(weights.values()) - 1.0) < 1e-9
+
+
+def test_mcap_to_debt_is_the_structural_leverage_measure():
+    """Equity value at market, over debt: how much cushion sits above the
+    bondholder. Logged because the ratio spans orders of magnitude."""
+    from models.credit import _factor_value
+    import math
+    assert _factor_value('mcap_to_debt', {'mcap': 1e11, 'total_debt': 1e10}) == \
+        pytest.approx(1.0)
+    assert _factor_value('log_mcap', {'mcap': 1e10}) == pytest.approx(10.0)
+
+
+def test_a_debt_free_issuer_has_no_leverage_story_rather_than_a_perfect_one():
+    from models.credit import _factor_value
+    assert _factor_value('mcap_to_debt', {'mcap': 1e11, 'total_debt': 0}) is None
+    assert _factor_value('mcap_to_debt', {'mcap': 1e11}) is None
+    assert _factor_value('log_mcap', {'mcap': 0}) is None
+
+
+def test_a_bigger_better_capitalised_issuer_scores_higher():
+    from models.credit import credit_score
+    strong = credit_score({'mcap': 5e11, 'total_debt': 2e10, 'int_cov': 20.0,
+                           'altman_z': 6.0, 'fcf': 4e10, 'nd_ebitda': 0.5})
+    weak = credit_score({'mcap': 8e8, 'total_debt': 4e9, 'int_cov': 1.2,
+                         'altman_z': 1.3, 'fcf': -1e8, 'nd_ebitda': 6.5})
+    assert strong['score'] > weak['score']
+    assert strong['coverage'] == pytest.approx(1.0)
+
+
+def test_banks_use_a_scorecard_that_does_not_need_ebitda():
+    """Operating cash flow reflects deposit and loan movements and EBITDA is
+    not a meaningful denominator, so the leverage and coverage factors cannot
+    describe a bank. Scale and market leverage still can."""
+    from scripts.config import CREDIT_FACTORS_FINANCIAL
+    fields = {f for f, _, _, _ in CREDIT_FACTORS_FINANCIAL}
+    assert 'nd_ebitda' not in fields and 'int_cov' not in fields
+    assert 'log_mcap' in fields and 'cet1_ratio' in fields
+    assert abs(sum(w for *_, w in CREDIT_FACTORS_FINANCIAL) - 1.0) < 1e-9
+
+
+def test_missing_factors_reweight_rather_than_scoring_zero():
+    """Missing leverage data is not evidence of bad leverage. The coverage
+    figure carries the uncertainty instead, and a bucket is refused below
+    MIN_FACTOR_COVERAGE."""
+    from models.credit import credit_score, implied_bucket
+    partial = credit_score({'mcap': 5e11, 'total_debt': 2e10})
+    assert partial['score'] is not None
+    assert 0.0 < partial['coverage'] < 1.0
+    assert implied_bucket({'int_cov': 8.0})['bucket'] is None   # too thin

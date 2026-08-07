@@ -254,16 +254,21 @@ def apply_credit_model(rows, params):
             skipped_government += 1
             continue
 
+        # Real dollar figures, not pre-divided ratios: mcap_to_debt and
+        # fcf_to_debt both need the raw denominators, and an earlier version
+        # passed total_debt as a unit placeholder which silently turned
+        # mcap_to_debt into log10(mcap).
         fundamentals = {
             'int_cov': row.get('issuer_int_cov'),
             'nd_ebitda': row.get('issuer_nd_ebitda'),
-            'fcf': row.get('issuer_fcf_to_debt'),   # already a ratio
-            'total_debt': 1.0 if row.get('issuer_fcf_to_debt') is not None else None,
+            'fcf': row.get('issuer_fcf'),
+            'total_debt': row.get('issuer_total_debt'),
             'altman_z': row.get('issuer_altman_z'),
             'revenue': row.get('issuer_revenue'),
             'piotroski': row.get('issuer_piotroski'),
             'cet1_ratio': row.get('issuer_cet1_ratio'),
             'npl_ratio': row.get('issuer_npl_ratio'),
+            'mcap': row.get('issuer_mcap'),
             'sector': row.get('issuer_sector'),
         }
         result = credit.implied_bucket(fundamentals,
