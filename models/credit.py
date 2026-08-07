@@ -173,7 +173,7 @@ def asset_class_for(bucket):
 # ---------------------------------------------------------------------------
 
 def fair_spread(bucket, maturity_years, bucket_oas, term_points=None,
-                wedge=None, beta=1.0):
+                wedge=None, beta=1.0, term_by_bucket=None):
     """The spread this bond should trade at, per the market's own pricing.
 
         fair = bucket OAS  x  term factor(maturity)  +  wedge(bucket)
@@ -185,16 +185,23 @@ def fair_spread(bucket, maturity_years, bucket_oas, term_points=None,
     thirty. Skipping it makes every short bond look rich and every long bond
     cheap, which is a term-structure artifact dressed as a credit signal.
 
-    KNOWN BIAS AT THE LONG END. The observed IG term slices stop at "15y+",
-    so the factor is flat beyond roughly twenty years — a 40-year bond gets
-    the same 1.27x as a 20-year one. Real spread curves keep rising, so long
-    bonds are assigned too tight a fair spread, look cheap against it, and
-    crowd the top of the ranking: every Meta and Amazon BUY in the first
-    corporate run matured between 2054 and 2076. Their +3-notch divergence is
-    partly a term artifact rather than a credit signal. Extrapolating the
-    factor would be inventing data; the honest fix is to calibrate
-    fair_spread_term_beta against forward returns at M8, and until then the
-    long end should be read with that bias in mind.
+    THE TERM FACTOR IS MEASURED, NOT BORROWED. `term_points` should come from
+    scripts/fit_term_structure.py, which fits the shape from ~130,000 observed
+    investment-grade spreads in the N-PORT panel. It falls back to FRED's IG
+    maturity slices when no fit exists.
+
+    The distinction matters more than it sounds. FRED's slices stop at "15y+",
+    so the factor was flat-extrapolated past twenty years, and they are
+    SUB-INDICES WITH DIFFERENT CONSTITUENTS — only the strongest issuers sell
+    forty-year paper, so ratio-ing one slice to another silently compares
+    different populations. Measured across a single population the curve is
+    nearly flat beyond seven years (1.08-1.20x), where FRED climbs to 1.27x.
+    The two agree to within 9% over three to ten years, which is what makes
+    the divergence past that believable rather than just our own pricing noise.
+
+    The old assumption therefore OVERSTATED long-dated fair spreads by up to
+    17%, making long bonds look richer than they were — the opposite of the
+    bias originally suspected.
 
     The WEDGE corrects Z-spread against OAS. We compute Z-spreads and compare
     them to an OAS index; for callable paper Z exceeds OAS by roughly the
@@ -207,10 +214,22 @@ def fair_spread(bucket, maturity_years, bucket_oas, term_points=None,
     if base is None:
         return None
 
+    # A per-bucket curve when one has been fitted, else the shared one. The
+    # distinction is large: measured across 72,000 observations, tight and mid
+    # credits rise with maturity while WIDE ones invert (0.95x short to 0.84x
+    # long), because a struggling issuer's problem is the next maturity rather
+    # than the one in twenty years. One shared rising curve gets high yield
+    # backwards by roughly 47%.
+    points = None
+    if term_by_bucket:
+        points = term_by_bucket.get(bucket)
+    if points is None:
+        points = term_points
+
     factor = 1.0
-    if term_points:
+    if points:
         from data.fred_client import term_factor_at
-        factor = term_factor_at(term_points, maturity_years, beta=beta)
+        factor = term_factor_at(points, maturity_years, beta=beta)
 
     adjustment = 0.0
     if wedge:
@@ -249,7 +268,8 @@ def price_mispricing(observed_clean, fair_clean):
 
 
 def market_implied_bucket(observed_z, maturity_years, bucket_oas,
-                          term_points=None, wedge=None, beta=1.0):
+                          term_points=None, wedge=None, beta=1.0,
+                          term_by_bucket=None):
     """Which bucket's fair spread best explains this bond's actual spread?
 
     The inverse of fair_spread: instead of asking what an A-rated issuer
@@ -261,7 +281,8 @@ def market_implied_bucket(observed_z, maturity_years, bucket_oas,
     best, best_gap = None, None
     for bucket in CREDIT_BUCKETS:
         implied = fair_spread(bucket, maturity_years, bucket_oas,
-                              term_points=term_points, wedge=wedge, beta=beta)
+                              term_points=term_points, wedge=wedge, beta=beta,
+                              term_by_bucket=term_by_bucket)
         if implied is None:
             continue
         gap = abs(observed_z - implied)

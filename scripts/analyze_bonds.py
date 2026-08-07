@@ -113,6 +113,23 @@ def build_context(as_of, use_fred=True):
         ctx['term_points'] = fred.fetch_term_factors(curve_date)['points']
         ctx['fred_source'] = fred.history_source
 
+    # A term structure fitted from our own observed spreads beats FRED's
+    # maturity slices: those stop at 15y+ and are sub-indices with different
+    # constituents, so they overstate long-dated fair spreads by up to 17%.
+    from scripts.fit_term_structure import load_fitted, load_tiered
+    ctx['term_by_bucket'] = load_tiered()
+    fitted = load_fitted()
+    if fitted:
+        ctx['term_points'] = fitted
+        ctx['term_source'] = 'fitted_nport_panel'
+        log.info('Term structure: fitted from the N-PORT panel (%d points)',
+                 len(fitted))
+    else:
+        ctx['term_source'] = 'fred_slices'
+        log.warning('No fitted term structure — falling back to FRED slices, '
+                    'which overstate the long end. Run '
+                    'scripts/fit_term_structure.py --apply')
+
     return ctx
 
 
@@ -272,7 +289,8 @@ def apply_fair_value(row, ctx, params, flows, settle):
 
     fair_z = credit.fair_spread(bucket, ttm, ctx.get('bucket_oas'),
                                 term_points=ctx.get('term_points'),
-                                wedge=ctx.get('wedge'), beta=beta)
+                                wedge=ctx.get('wedge'), beta=beta,
+                                term_by_bucket=ctx.get('term_by_bucket'))
     row['fair_spread'] = fair_z
     row['spread_mispricing'] = credit.spread_mispricing(observed_z, fair_z)
 
@@ -286,7 +304,8 @@ def apply_fair_value(row, ctx, params, flows, settle):
 
     market = credit.market_implied_bucket(
         observed_z, ttm, ctx.get('bucket_oas'),
-        term_points=ctx.get('term_points'), wedge=ctx.get('wedge'), beta=beta)
+        term_points=ctx.get('term_points'), wedge=ctx.get('wedge'), beta=beta,
+        term_by_bucket=ctx.get('term_by_bucket'))
     row['market_bucket'] = market
 
     gap = credit.divergence(bucket, market,

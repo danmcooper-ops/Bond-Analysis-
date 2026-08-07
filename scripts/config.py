@@ -34,8 +34,8 @@ RATING_THRESHOLD_PASS = 25
 RATING_THRESHOLDS_BY_CLASS = {
     'TREASURY': {'buy': 72.5, 'lean': 62.6, 'pass': 51.0},
     'AGENCY': {},
-    'CORP_IG': {'buy': 64.0, 'lean': 40.7, 'pass': 29.8},
-    'CORP_HY': {'buy': 62.6, 'lean': 46.6, 'pass': 35.0},
+    'CORP_IG': {'buy': 63.8, 'lean': 40.5, 'pass': 30.0},
+    'CORP_HY': {'buy': 64.6, 'lean': 47.2, 'pass': 34.1},
     'TREASURY_BILL': {'buy': 72.5, 'lean': 62.6, 'pass': 51.0},
 }
 

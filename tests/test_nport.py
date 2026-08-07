@@ -291,3 +291,38 @@ def test_latest_marks_keeps_the_most_recent_month():
     latest = latest_marks(marks)
     assert len(latest) == 1
     assert latest[0]['report_date'] == date(2026, 4, 30)
+
+
+# ---------------------------------------------------------------------------
+# Term structure
+# ---------------------------------------------------------------------------
+
+def test_wide_credit_term_curves_invert_where_tight_ones_rise():
+    """The measured shapes are not one curve. Tight and mid credits widen with
+    maturity; WIDE ones narrow, because a struggling issuer's problem is
+    refinancing the next maturity rather than the one in twenty years.
+    A single rising curve gets high yield backwards by roughly 47%."""
+    from data.fred_client import term_factor_at
+    tight = [(1.5, 0.86), (4.0, 1.00), (8.5, 1.08), (22.5, 1.12), (38.0, 1.07)]
+    wide = [(1.5, 0.95), (4.0, 1.00), (8.5, 0.87), (22.5, 0.81), (38.0, 0.84)]
+    assert term_factor_at(tight, 25) > term_factor_at(tight, 5)
+    assert term_factor_at(wide, 25) < term_factor_at(wide, 5)
+
+
+def test_fair_spread_prefers_the_bucket_specific_curve():
+    from models.credit import fair_spread
+    oas = {'AAA': 0.0038, 'B': 0.029}
+    shared = [(4.0, 1.0), (30.0, 1.2)]
+    by_bucket = {'B': [(4.0, 1.0), (30.0, 0.84)]}
+    # B rides its own inverting curve; AAA has none and falls back to shared.
+    assert fair_spread('B', 30, oas, term_points=shared,
+                       term_by_bucket=by_bucket) < fair_spread(
+        'B', 30, oas, term_points=shared)
+    assert fair_spread('AAA', 30, oas, term_points=shared,
+                       term_by_bucket=by_bucket) == pytest.approx(
+        fair_spread('AAA', 30, oas, term_points=shared))
+
+
+def test_fair_spread_without_any_term_data_is_the_flat_index():
+    from models.credit import fair_spread
+    assert fair_spread('BBB', 10, {'BBB': 0.0096}) == pytest.approx(0.0096)

@@ -190,8 +190,20 @@ class PointInTime:
         return self._oas[when]
 
     def term_points(self, when):
+        """The fitted structure when available, else FRED's slices.
+
+        The fit is not point-in-time — it pools every month — so it does carry
+        a little hindsight about the average SHAPE of the curve. That is a far
+        smaller contamination than using FRED's slices, which are wrong by up
+        to 17% at the long end in every period, and the shape moves slowly
+        enough that pooling it is defensible where using a future balance
+        sheet is not.
+        """
         if when not in self._term:
-            self._term[when] = self._fred.fetch_term_factors(when)['points']
+            from scripts.fit_term_structure import load_fitted
+            fitted = load_fitted()
+            self._term[when] = (fitted if fitted
+                                else self._fred.fetch_term_factors(when)['points'])
         return self._term[when]
 
     def fundamentals(self, when):
@@ -270,9 +282,12 @@ def signals_at(row, pit, params):
     oas = pit.bucket_oas(when)
     term = pit.term_points(when)
     beta = params.get('fair_spread_term_beta', 1.0)
-    fair = credit.fair_spread(bucket, ttm, oas, term_points=term, beta=beta)
+    from scripts.fit_term_structure import load_tiered
+    tiered = load_tiered()
+    fair = credit.fair_spread(bucket, ttm, oas, term_points=term, beta=beta,
+                              term_by_bucket=tiered)
     market = credit.market_implied_bucket(z, ttm, oas, term_points=term,
-                                          beta=beta)
+                                          beta=beta, term_by_bucket=tiered)
     gap = credit.divergence(bucket, market)
 
     return {
