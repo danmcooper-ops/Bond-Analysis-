@@ -22,7 +22,15 @@ from collections import Counter
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from models.credit import CREDIT_BUCKETS, CUTPOINT_PARAMS, calibrate_cutpoints
+import json
+
+from models.credit import (CREDIT_BUCKETS, CUTPOINT_PARAMS, calibrate_cutpoints,
+                           fit_bucket_anchors)
+from scripts.fit_term_structure import load_fitted, load_tiered
+
+ANCHOR_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    'output', 'credit_anchors.json')
 
 ORDER = list(CREDIT_BUCKETS)
 INDEX_OAS_BP = {'AAA': 38, 'AA': 56, 'A': 64, 'BBB': 96,
@@ -111,6 +119,60 @@ def apply(cuts):
     print("  the backtest asks.\n")
 
 
+def fit_anchors(rows):
+    """Median spread of each bucket's own members, de-termed to 5 years."""
+    return fit_bucket_anchors(rows, term_points=load_fitted(),
+                              term_by_bucket=load_tiered())
+
+
+def report_anchors(anchors):
+    meta = anchors.get('_meta', {})
+    print(f"\n  FAIR-SPREAD ANCHORS — the model's own buckets, not an index")
+    print(f"    {'bucket':<7}{'n':>7}{'anchor':>10}{'index OAS':>12}{'gap':>9}")
+    for bucket in ORDER:
+        info = meta.get(bucket)
+        if not info:
+            continue
+        if not info.get('used'):
+            reason = info.get('dropped', f"only {info['n']} bonds")
+            print(f"    {bucket:<7}{info['n']:>7}{'dropped':>10}"
+                  f"{INDEX_OAS_BP[bucket]:>10}bp   ({reason})")
+            continue
+        value = info['anchor'] * 10000
+        gap = value - INDEX_OAS_BP[bucket]
+        print(f"    {bucket:<7}{info['n']:>7}{value:>8.0f}bp"
+              f"{INDEX_OAS_BP[bucket]:>10}bp{gap:>+8.0f}")
+    print(f"\n    Investment grade anchors sit WIDER than the index and high")
+    print(f"    yield far TIGHTER, because the model's buckets are not the")
+    print(f"    index's constituents. Pricing one population off the other is")
+    print(f"    what gave Meta's 39-year bond a 41bp fair spread against a")
+    print(f"    143bp market spread.")
+
+
+def write_anchors(anchors):
+    os.makedirs(os.path.dirname(ANCHOR_PATH), exist_ok=True)
+    payload = {k: v for k, v in anchors.items() if not k.startswith('_')}
+    with open(ANCHOR_PATH, 'w', encoding='utf-8') as fh:
+        json.dump({'anchors': payload, 'meta': anchors.get('_meta', {})},
+                  fh, indent=2)
+    print(f"\n  Wrote {len(payload)} bucket anchors to "
+          f"{os.path.basename(ANCHOR_PATH)}")
+
+
+def load_anchors(path=None):
+    """{bucket: anchor_spread}, or None. Used by the pipeline."""
+    path = path or ANCHOR_PATH
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, encoding='utf-8') as fh:
+            payload = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    anchors = payload.get('anchors') or {}
+    return {k: float(v) for k, v in anchors.items()} or None
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -123,8 +185,23 @@ def main():
     if not cuts:
         raise SystemExit('[fatal] not enough scored rows to calibrate')
     report(rows, cuts)
+
+    # Anchors are fitted with the NEW cutpoints in force, since the bucket a
+    # bond lands in decides which anchor it contributes to.
+    from models.credit import bucket_from_score
+    rebucketed = []
+    for row in rows:
+        score = row.get('issuer_credit_score')
+        if score is None:
+            continue
+        rebucketed.append({**row,
+                           'implied_bucket': bucket_from_score(score, cuts)})
+    anchors = fit_anchors(rebucketed)
+    report_anchors(anchors)
+
     if args.apply:
         apply(cuts)
+        write_anchors(anchors)
     else:
         print("\n  Re-run with --apply to write these into scripts/config.py.\n")
     return 0

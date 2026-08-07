@@ -517,3 +517,61 @@ def test_calibration_refuses_a_thin_sample():
     from models.credit import calibrate_cutpoints
     assert calibrate_cutpoints([{'issuer_credit_score': 50.0,
                                  'market_bucket': 'A'}] * 10) == {}
+
+
+# ---------------------------------------------------------------------------
+# Fair-spread anchors
+# ---------------------------------------------------------------------------
+
+def test_a_fitted_bucket_anchor_overrides_the_published_index():
+    """FRED's AAA index is a handful of genuinely AAA issuers at 38bp; this
+    model's AAA bucket is several hundred merely-excellent ones at 53bp.
+    Pricing the second population off the first is a population mismatch."""
+    from models.credit import fair_spread
+    oas = {'AAA': 0.0038}
+    anchors = {'AAA': 0.0053}
+    assert fair_spread('AAA', 5, oas) == pytest.approx(0.0038)
+    assert fair_spread('AAA', 5, oas, bucket_anchors=anchors) == pytest.approx(0.0053)
+
+
+def test_a_bucket_without_an_anchor_falls_back_to_the_index():
+    """CCC had three bonds in the universe. A median over three is not an
+    anchor, so that bucket keeps the published index."""
+    from models.credit import fair_spread
+    oas = {'AAA': 0.0038, 'CCC': 0.1023}
+    anchors = {'AAA': 0.0053}
+    assert fair_spread('CCC', 5, oas, bucket_anchors=anchors) == pytest.approx(0.1023)
+
+
+def test_anchors_are_de_termed_before_the_median():
+    """A bucket whose members skew long must not inherit a wider anchor purely
+    from tenor — each spread is divided by its own term factor first."""
+    from models.credit import fit_bucket_anchors
+    points = [(4.0, 1.0), (30.0, 2.0)]
+    rows = [{'implied_bucket': 'A', 'z_spread': 0.010, 'years_to_maturity': 4.0}] * 30
+    rows += [{'implied_bucket': 'A', 'z_spread': 0.020, 'years_to_maturity': 30.0}] * 30
+    fitted = fit_bucket_anchors(rows, term_points=points, min_per_bucket=10)
+    # Both groups de-term to 100bp, so the anchor is 100bp — not the 150bp a
+    # naive median of 100 and 200 would give.
+    assert fitted['A'] == pytest.approx(0.010, abs=1e-4)
+
+
+def test_anchors_must_widen_as_credit_worsens():
+    """A bucket that is not wider than the better one is DROPPED rather than
+    forced: it means the scorecard is not separating those grades, and
+    inventing a gap would hide that."""
+    from models.credit import fit_bucket_anchors
+    rows = ([{'implied_bucket': 'A', 'z_spread': 0.010, 'years_to_maturity': 5.0}] * 60
+            + [{'implied_bucket': 'BBB', 'z_spread': 0.008, 'years_to_maturity': 5.0}] * 60)
+    fitted = fit_bucket_anchors(rows, min_per_bucket=10)
+    assert 'A' in fitted
+    assert 'BBB' not in fitted            # tighter than A, so not usable
+    assert fitted['_meta']['BBB']['used'] is False
+
+
+def test_thin_buckets_are_omitted_not_fitted():
+    from models.credit import fit_bucket_anchors
+    rows = [{'implied_bucket': 'CCC', 'z_spread': 0.30,
+             'years_to_maturity': 5.0}] * 3
+    fitted = fit_bucket_anchors(rows, min_per_bucket=50)
+    assert 'CCC' not in fitted

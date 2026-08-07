@@ -282,12 +282,14 @@ def signals_at(row, pit, params):
     oas = pit.bucket_oas(when)
     term = pit.term_points(when)
     beta = params.get('fair_spread_term_beta', 1.0)
+    from scripts.calibrate_credit import load_anchors
     from scripts.fit_term_structure import load_tiered
-    tiered = load_tiered()
+    tiered, anchors = load_tiered(), load_anchors()
     fair = credit.fair_spread(bucket, ttm, oas, term_points=term, beta=beta,
-                              term_by_bucket=tiered)
+                              term_by_bucket=tiered, bucket_anchors=anchors)
     market = credit.market_implied_bucket(z, ttm, oas, term_points=term,
-                                          beta=beta, term_by_bucket=tiered)
+                                          beta=beta, term_by_bucket=tiered,
+                                          bucket_anchors=anchors)
     gap = credit.divergence(bucket, market)
 
     return {

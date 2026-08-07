@@ -116,8 +116,17 @@ def build_context(as_of, use_fred=True):
     # A term structure fitted from our own observed spreads beats FRED's
     # maturity slices: those stop at 15y+ and are sub-indices with different
     # constituents, so they overstate long-dated fair spreads by up to 17%.
+    from scripts.calibrate_credit import load_anchors
     from scripts.fit_term_structure import load_fitted, load_tiered
     ctx['term_by_bucket'] = load_tiered()
+    ctx['bucket_anchors'] = load_anchors()
+    if ctx['bucket_anchors']:
+        log.info('Fair-spread anchors: fitted from the model\'s own buckets '
+                 '(%d of 7)', len(ctx['bucket_anchors']))
+    else:
+        log.warning('No fitted bucket anchors — falling back to the published '
+                    'index OAS, whose constituents are not this model\'s '
+                    'bucket members. Run scripts/calibrate_credit.py --apply')
     fitted = load_fitted()
     if fitted:
         ctx['term_points'] = fitted
@@ -290,7 +299,8 @@ def apply_fair_value(row, ctx, params, flows, settle):
     fair_z = credit.fair_spread(bucket, ttm, ctx.get('bucket_oas'),
                                 term_points=ctx.get('term_points'),
                                 wedge=ctx.get('wedge'), beta=beta,
-                                term_by_bucket=ctx.get('term_by_bucket'))
+                                term_by_bucket=ctx.get('term_by_bucket'),
+                                bucket_anchors=ctx.get('bucket_anchors'))
     row['fair_spread'] = fair_z
     row['spread_mispricing'] = credit.spread_mispricing(observed_z, fair_z)
 
@@ -305,7 +315,8 @@ def apply_fair_value(row, ctx, params, flows, settle):
     market = credit.market_implied_bucket(
         observed_z, ttm, ctx.get('bucket_oas'),
         term_points=ctx.get('term_points'), wedge=ctx.get('wedge'), beta=beta,
-        term_by_bucket=ctx.get('term_by_bucket'))
+        term_by_bucket=ctx.get('term_by_bucket'),
+        bucket_anchors=ctx.get('bucket_anchors'))
     row['market_bucket'] = market
 
     gap = credit.divergence(bucket, market,

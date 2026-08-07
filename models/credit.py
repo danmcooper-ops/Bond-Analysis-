@@ -173,7 +173,8 @@ def asset_class_for(bucket):
 # ---------------------------------------------------------------------------
 
 def fair_spread(bucket, maturity_years, bucket_oas, term_points=None,
-                wedge=None, beta=1.0, term_by_bucket=None):
+                wedge=None, beta=1.0, term_by_bucket=None,
+                bucket_anchors=None):
     """The spread this bond should trade at, per the market's own pricing.
 
         fair = bucket OAS  x  term factor(maturity)  +  wedge(bucket)
@@ -210,7 +211,30 @@ def fair_spread(bucket, maturity_years, bucket_oas, term_points=None,
     """
     if bucket is None or maturity_years is None:
         return None
-    base = (bucket_oas or {}).get(bucket)
+
+    # THE ANCHOR IS THE MODEL'S OWN BUCKET, NOT AN EXTERNAL INDEX.
+    #
+    # FRED's AAA index is a handful of genuinely AAA issuers trading at 38bp.
+    # This model's AAA bucket is several hundred merely-excellent ones trading
+    # at 53bp. Pricing the second population off the first is a population
+    # mismatch — the same error found in FRED's maturity slices, one level up —
+    # and it is severe in high yield, where the model's B bucket trades at
+    # 142bp against an index at 290bp.
+    #
+    # Anchoring each bucket on the de-termed median spread of ITS OWN members
+    # makes the question self-consistent: not "is this bond cheap against an
+    # index of different bonds", but "is it cheap against bonds the model
+    # judges to be of the same quality and tenor". That is the relative-value
+    # question the model is actually equipped to answer.
+    #
+    # The cost is that absolute level information is gone: by construction
+    # roughly half of each bucket is cheap and half rich. The signal becomes
+    # purely cross-sectional, which is honest about what it measures. Thin
+    # buckets fall back to the index, since a median over three bonds is not
+    # an anchor.
+    base = (bucket_anchors or {}).get(bucket)
+    if base is None:
+        base = (bucket_oas or {}).get(bucket)
     if base is None:
         return None
 
@@ -269,7 +293,7 @@ def price_mispricing(observed_clean, fair_clean):
 
 def market_implied_bucket(observed_z, maturity_years, bucket_oas,
                           term_points=None, wedge=None, beta=1.0,
-                          term_by_bucket=None):
+                          term_by_bucket=None, bucket_anchors=None):
     """Which bucket's fair spread best explains this bond's actual spread?
 
     The inverse of fair_spread: instead of asking what an A-rated issuer
@@ -282,7 +306,8 @@ def market_implied_bucket(observed_z, maturity_years, bucket_oas,
     for bucket in CREDIT_BUCKETS:
         implied = fair_spread(bucket, maturity_years, bucket_oas,
                               term_points=term_points, wedge=wedge, beta=beta,
-                              term_by_bucket=term_by_bucket)
+                              term_by_bucket=term_by_bucket,
+                              bucket_anchors=bucket_anchors)
         if implied is None:
             continue
         gap = abs(observed_z - implied)
@@ -412,4 +437,66 @@ def calibrate_cutpoints(rows, min_per_bucket=25, min_rows=300):
         value = min(value, ceiling - 0.5)
         ordered[param] = round(value, 1)
         ceiling = value
+    return ordered
+
+
+def fit_bucket_anchors(rows, term_points=None, term_by_bucket=None,
+                       min_per_bucket=50, reference_years=5.0):
+    """Median spread of each bucket's own members, de-termed to a reference tenor.
+
+    Each observed spread is divided by its own term factor before the median
+    is taken, so a bucket whose members skew long does not inherit a wider
+    anchor purely from tenor. The result is a level per bucket that
+    `fair_spread` then re-terms for the bond being priced.
+
+    Buckets thinner than `min_per_bucket` are omitted rather than fitted: a
+    median over three bonds is noise, and `fair_spread` falls back to the
+    published index for those.
+
+    Returns {bucket: anchor_spread}, plus diagnostics under '_meta'.
+    """
+    from data.fred_client import term_factor_at
+
+    by_bucket = {}
+    for row in rows:
+        bucket = row.get('implied_bucket')
+        spread = row.get('z_spread')
+        tenor = row.get('years_to_maturity')
+        if not bucket or spread is None or tenor is None:
+            continue
+        if not (0.0 < spread < 0.50):
+            continue
+        points = (term_by_bucket or {}).get(bucket) or term_points
+        factor = term_factor_at(points, tenor) if points else 1.0
+        # A near-zero factor would explode the de-termed value; the floor is a
+        # guard against a degenerate fitted curve, not a tuning knob.
+        by_bucket.setdefault(bucket, []).append(spread / max(factor, 0.2))
+
+    anchors, meta = {}, {}
+    for bucket, values in by_bucket.items():
+        if len(values) < min_per_bucket:
+            meta[bucket] = {'n': len(values), 'used': False}
+            continue
+        values.sort()
+        anchors[bucket] = round(values[len(values) // 2], 6)
+        meta[bucket] = {'n': len(values), 'used': True,
+                        'anchor': anchors[bucket]}
+
+    # Anchors must rise as credit worsens, or the scale inverts. A bucket that
+    # breaks the ordering is dropped rather than forced: it means the scorecard
+    # is not separating those two grades, and inventing a gap would hide that.
+    ordered, floor = {}, 0.0
+    for bucket in CREDIT_BUCKETS:
+        value = anchors.get(bucket)
+        if value is None:
+            continue
+        if value <= floor:
+            meta[bucket]['used'] = False
+            meta[bucket]['dropped'] = 'not wider than the better bucket'
+            continue
+        ordered[bucket] = value
+        floor = value
+
+    ordered['_meta'] = meta
+    ordered['_reference_years'] = reference_years
     return ordered
