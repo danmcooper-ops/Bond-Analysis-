@@ -95,6 +95,23 @@ def ensure_worktree():
             shutil.rmtree(path) if os.path.isdir(path) else os.remove(path)
 
 
+def stage_workflow():
+    """Copy the Pages workflow onto the publish branch.
+
+    GitHub reads workflow files from the branch that was PUSHED, so a
+    `on: push: branches: [pages-live]` trigger in a workflow that lives only on
+    main never fires — the first publish pushed successfully and nothing
+    happened. The orphan branch needs its own copy.
+    """
+    source = os.path.join(REPO_ROOT, '.github', 'workflows', 'deploy-pages.yml')
+    if not os.path.exists(source):
+        log.warning('No deploy-pages.yml on main; Pages will not rebuild')
+        return
+    target_dir = os.path.join(WORKTREE, '.github', 'workflows')
+    os.makedirs(target_dir, exist_ok=True)
+    shutil.copy2(source, os.path.join(target_dir, 'deploy-pages.yml'))
+
+
 def stage(report_path):
     docs = os.path.join(WORKTREE, 'docs')
     os.makedirs(docs, exist_ok=True)
@@ -111,7 +128,7 @@ def stage(report_path):
 
 
 def commit_and_push(stamp, dry_run=False):
-    git('add', '-A', 'docs', cwd=WORKTREE)
+    git('add', '-A', 'docs', '.github', cwd=WORKTREE)
     status = git('status', '--porcelain', cwd=WORKTREE, quiet=True)
     if not status.stdout.strip():
         head = git('rev-parse', '--verify', 'HEAD', cwd=WORKTREE, check=False,
@@ -157,6 +174,7 @@ def main():
 
     ensure_worktree()
     try:
+        stage_workflow()
         size = stage(report)
         if size > 95:
             raise SystemExit(f'[fatal] {size:.0f} MB exceeds the GitHub Pages '
