@@ -84,9 +84,21 @@ def build_context(as_of, use_fred=True):
     else:
         log.info('Curve %s bootstrapped, repricing error %.2e', curve_date, err)
 
+    # Curves at past mark dates, for the mark-to-curve overlay. Cached per run
+    # because a few thousand bonds share a handful of month-end mark dates.
+    historical = {}
+
+    def curve_at(when):
+        if when not in historical:
+            past_date, past_par = tc.fetch_par_curve(when)
+            historical[when] = (YieldCurve.from_par_dict(past_date, past_par)
+                                if past_par else None)
+        return historical[when]
+
     ctx = {
         'curve': curve,
         'curve_date': curve_date,
+        'curve_at': curve_at,
         'par': par,
         'regime': tc.regime(as_of) or {},
         'front_end_yield': par.get('3M') or par.get('6M') or par.get('1M'),
@@ -108,6 +120,72 @@ def build_context(as_of, use_fred=True):
 # Phase 1: universe
 # ---------------------------------------------------------------------------
 
+def attach_nport_marks(rows, as_of, quarter=None):
+    """Stamp consensus marks onto rows by CUSIP. Returns the number matched.
+
+    This is where the gate masking proves itself data-driven rather than
+    hardcoded: a Treasury with no marks has its fund-liquidity gates
+    structurally inapplicable, and the same Treasury with marks attached picks
+    them up. Nothing about the asset class changed — only what is measurable
+    about it.
+    """
+    from data.nport_client import NPORTClient
+    from data.nport_consensus import latest_marks
+
+    client = NPORTClient()
+    if quarter is None:
+        available = sorted(f.split('_')[0] for f in
+                           os.listdir(client.cache_dir)
+                           if f.endswith('_marks.parquet')) \
+            if os.path.isdir(client.cache_dir) else []
+        if not available:
+            log.info('No N-PORT marks cached; prices will be curve-implied')
+            return 0
+        quarter = available[-1]
+
+    path = os.path.join(client.cache_dir, f'{quarter}_marks.parquet')
+    if not os.path.exists(path):
+        log.warning('N-PORT marks not found: %s', path)
+        return 0
+
+    import pandas as pd
+    marks = latest_marks(pd.read_parquet(path).to_dict('records'))
+    by_cusip = {m['cusip']: m for m in marks}
+    log.info('N-PORT %s: %d CUSIPs with marks', quarter, len(by_cusip))
+
+    matched = 0
+    for row in rows:
+        mark = by_cusip.get((row.get('cusip') or '').strip().upper())
+        if mark is None:
+            continue
+        report_date = mark['report_date']
+        if hasattr(report_date, 'date'):
+            report_date = report_date.date()
+        # A mark from the future relative to the as-of date would be
+        # look-ahead bias walked straight into the backtest.
+        if report_date > as_of:
+            continue
+        matched += 1
+        row.update({
+            'clean_price_marked': mark['clean_price_marked'],
+            'price_basis': mark['price_basis'],
+            'mark_date': report_date,
+            'mark_age_days': (as_of - report_date).days,
+            'n_funds': int(mark['n_funds']),
+            'total_held_usd': mark['total_held_usd'],
+            'price_dispersion': mark['price_dispersion'],
+            'fair_value_level': mark['fair_value_level'],
+            '_identity_conflict': bool(mark['_identity_conflict']),
+        })
+        # Trouble flags come from the funds, which see them before we do.
+        for flag in ('is_default', 'in_arrears', 'is_paid_kind'):
+            if mark.get(flag):
+                row[flag] = True
+
+    log.info('N-PORT marks attached to %d of %d rows', matched, len(rows))
+    return matched
+
+
 def load_treasury_universe(as_of, max_years=31):
     td = TreasuryDirectClient()
     records = td.fetch_outstanding(as_of=as_of, max_years=max_years)
@@ -128,22 +206,93 @@ def load_treasury_universe(as_of, max_years=31):
 # Phase 3: per-bond analytics
 # ---------------------------------------------------------------------------
 
+def _price_with_overlay(row, bond, ctx, settle, flows, accrued):
+    """Return (clean, dirty), ageing a stale mark forward onto today's curve.
+
+    A MARK IS NOT A PRICE. N-PORT marks are month-end and reach us with a
+    ~60-day lag, so using one directly as today's price is wrong by whatever
+    the market did in between — and catastrophically wrong for short paper,
+    which converges to par. A bill marked at 98.5 in April is worth ~99.9 in
+    August when it has a week left; applied raw, that April price implied a
+    54% yield and put four bills at the top of the BUY list.
+
+    So the mark is used for what it actually observes — this bond's SPREAD to
+    the curve on the day it was struck — and that spread is then applied to
+    today's curve:
+
+        z_at_mark  = z_spread(marked price, curve on the mark date)
+        clean_est  = spread_to_price(z_at_mark, today's curve)
+
+    For a Treasury the spread is ~0 and this collapses to repricing off
+    today's curve, which is correct. For a corporate it preserves the credit
+    information in the mark while removing the stale rate move — the honest
+    version of "a daily price from monthly data". The overlay does not yet age
+    the spread itself on the bucket-OAS move; that arrives with the corporate
+    universe at M6.
+    """
+    curve = ctx['curve']
+    marked = row.get('clean_price_marked')
+    mark_date = row.get('mark_date')
+
+    if marked is None or mark_date is None:
+        dirty = price_from_zero_curve(flows, settle, curve, spread=0.0)
+        if dirty is None:
+            return None, None
+        row['price_source'] = 'curve_implied'
+        return dirty - accrued, dirty
+
+    mark_curve = ctx['curve_at'](mark_date)
+    if mark_curve is not None:
+        # The bond as it stood on the mark date: its own remaining cashflows
+        # then, not the ones it has now.
+        past_flows, _ = bond_flows_and_stub(
+            bond.coupon_rate, bond.maturity, mark_date,
+            frequency=bond.frequency, convention=bond.convention,
+            face=bond.face, dated_date=bond.dated_date, eom=bond.eom)
+        past_accrued = accrued_interest(
+            mark_date, bond.coupon_rate, bond.maturity,
+            frequency=bond.frequency, face=bond.face,
+            convention=bond.convention, dated_date=bond.dated_date,
+            eom=bond.eom)
+        if past_flows:
+            z_at_mark = z_spread(marked + past_accrued, past_flows, mark_date,
+                                 mark_curve)
+            if z_at_mark is not None:
+                dirty = price_from_zero_curve(flows, settle, curve,
+                                              spread=z_at_mark)
+                if dirty is not None:
+                    row['z_spread_at_mark'] = z_at_mark
+                    row['price_source'] = 'mark_aged_to_curve'
+                    clean = dirty - accrued
+                    drift = abs(clean - marked)
+                    row['_mark_drift'] = drift
+                    # A large gap between the raw mark and the aged estimate
+                    # means the rate move since has dominated; worth surfacing
+                    # rather than quietly presenting the estimate as a price.
+                    row['_mark_drift_flag'] = drift > 3.0
+                    return clean, dirty
+
+    # The mark cannot be aged (no curve for that date, or the spread would not
+    # solve). Falling back to the raw mark would reintroduce the stale-price
+    # bug, so use the curve and keep the mark as reference only.
+    dirty = price_from_zero_curve(flows, settle, curve, spread=0.0)
+    if dirty is None:
+        return None, None
+    row['price_source'] = 'curve_implied_mark_unusable'
+    return dirty - accrued, dirty
+
+
 def _analyze_discount(row, bond, ctx, settle):
     """Bills and other single-cashflow instruments, on money-market terms."""
     curve = ctx['curve']
     flows = [(bond.maturity, bond.face)]
 
-    marked = row.get('clean_price_marked')
-    if marked is not None:
-        clean = dirty = marked
-        row['price_source'] = 'nport_consensus'
-    else:
-        dirty = price_from_zero_curve(flows, settle, curve, spread=0.0)
-        if dirty is None:
-            row['_drop_reason'] = 'curve pricing failed'
-            return None
-        clean = dirty
-        row['price_source'] = 'curve_implied'
+    # Discount instruments take the same overlay treatment, and need it most:
+    # they converge to par fastest, so a stale mark is most wrong here.
+    clean, dirty = _price_with_overlay(row, bond, ctx, settle, flows, 0.0)
+    if clean is None:
+        row['_drop_reason'] = 'curve pricing failed'
+        return None
 
     # A discount instrument accrues nothing; clean and dirty coincide.
     row['accrued'] = 0.0
@@ -210,17 +359,10 @@ def analyze_bond(row, ctx, settle, params):
     row['accrued'] = accrued
 
     # -- price ---------------------------------------------------------------
-    marked = row.get('clean_price_marked')
-    if marked is not None:
-        clean, dirty = marked, marked + accrued
-        row['price_source'] = 'nport_consensus'
-    else:
-        dirty = price_from_zero_curve(flows, settle, curve, spread=0.0)
-        if dirty is None:
-            row['_drop_reason'] = 'curve pricing failed'
-            return None
-        clean = dirty - accrued
-        row['price_source'] = 'curve_implied'
+    clean, dirty = _price_with_overlay(row, bond, ctx, settle, flows, accrued)
+    if clean is None:
+        row['_drop_reason'] = 'curve pricing failed'
+        return None
     row['clean_price_est'] = clean
     row['dirty_price'] = dirty
 
@@ -500,6 +642,11 @@ def main():
                     help='write JSON instead of parquet (debugging)')
     ap.add_argument('--no-fred', action='store_true')
     ap.add_argument('--no-write', action='store_true')
+    ap.add_argument('--marks', default=None, metavar='QUARTER',
+                    help='attach N-PORT consensus marks from this quarter '
+                         '(default: the newest ingested)')
+    ap.add_argument('--no-marks', action='store_true',
+                    help='ignore N-PORT marks; price everything off the curve')
     args = ap.parse_args()
 
     settle = args.as_of or date.today()
@@ -514,6 +661,9 @@ def main():
     log.info('Phase 1: universe (%s)', args.universe)
     raw = load_treasury_universe(settle, max_years=args.max_years)
     log.info('  %d reference rows', len(raw))
+
+    if not args.no_marks:
+        attach_nport_marks(raw, settle, quarter=args.marks)
 
     log.info('Phase 3: analytics')
     rows, dropped = [], Counter()
