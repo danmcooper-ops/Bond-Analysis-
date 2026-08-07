@@ -34,8 +34,8 @@ RATING_THRESHOLD_PASS = 25
 RATING_THRESHOLDS_BY_CLASS = {
     'TREASURY': {'buy': 72.5, 'lean': 62.6, 'pass': 51.0},
     'AGENCY': {},
-    'CORP_IG': {'buy': 63.8, 'lean': 40.5, 'pass': 30.0},
-    'CORP_HY': {'buy': 64.6, 'lean': 47.2, 'pass': 34.1},
+    'CORP_IG': {'buy': 67.6, 'lean': 43.4, 'pass': 30.2},
+    'CORP_HY': {'buy': 62.8, 'lean': 45.5, 'pass': 33.2},
     'TREASURY_BILL': {'buy': 72.5, 'lean': 62.6, 'pass': 51.0},
 }
 
@@ -79,12 +79,12 @@ CREDIT_BUCKETS = ('AAA', 'AA', 'A', 'BBB', 'BB', 'B', 'CCC')
 # Score cutpoints, high to low. Calibrated monthly against the market: the
 # cutpoints are chosen so each implied bucket's median observed Z-spread lines
 # up with the FRED bucket OAS + fitted wedge. These are the seed values.
-CREDIT_CUT_AAA = 88
-CREDIT_CUT_AA = 78
-CREDIT_CUT_A = 66
-CREDIT_CUT_BBB = 52
-CREDIT_CUT_BB = 38
-CREDIT_CUT_B = 24
+CREDIT_CUT_AAA = 81.9
+CREDIT_CUT_AA = 69.0
+CREDIT_CUT_A = 49.8
+CREDIT_CUT_BBB = 34.7
+CREDIT_CUT_BB = 22.5
+CREDIT_CUT_B = 10.4
 
 # Non-financial issuer scorecard: (field, worst, best, weight)
 CREDIT_FACTORS_CORPORATE = (

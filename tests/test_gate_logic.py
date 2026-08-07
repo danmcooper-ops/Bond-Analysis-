@@ -456,3 +456,64 @@ def test_government_paper_keeps_its_asset_class_through_the_credit_model():
     assert rows[1]['asset_class'] == 'TREASURY_BILL'
     assert rows[2]['asset_class'] in ('CORP_IG', 'CORP_HY')
     assert 'implied_bucket' not in rows[0]
+
+
+# ---------------------------------------------------------------------------
+# Credit cutpoints
+# ---------------------------------------------------------------------------
+
+def test_calibrated_cutpoints_place_most_of_the_universe_in_investment_grade():
+    """The seed cutpoints split a roughly uniform score distribution into
+    sevenths, assigning 51% of the universe to high yield when the market
+    prices 23% there — and 258 bonds to CCC where the market saw three. Those
+    'CCC' bonds traded at 120bp; the real CCC index is 1023bp.
+
+    The mislabel is not cosmetic: fair_spread multiplies by the bucket's index
+    OAS, so a BBB called CCC is handed a 1023bp fair spread and reads as
+    absurdly rich."""
+    from models.credit import bucket_from_score
+    from scripts.config import (CREDIT_CUT_A, CREDIT_CUT_AA, CREDIT_CUT_AAA,
+                                CREDIT_CUT_B, CREDIT_CUT_BB, CREDIT_CUT_BBB)
+    # A median-quality issuer must not read as high yield.
+    assert bucket_from_score(50.0) in ('AAA', 'AA', 'A', 'BBB')
+    # Only genuinely weak scores reach the distressed buckets.
+    assert bucket_from_score(5.0) in ('B', 'CCC')
+    assert CREDIT_CUT_AAA > CREDIT_CUT_AA > CREDIT_CUT_A > CREDIT_CUT_BBB
+    assert CREDIT_CUT_BBB > CREDIT_CUT_BB > CREDIT_CUT_B
+
+
+def test_calibration_matches_the_market_bucket_mix():
+    """Distribution matching: the model's mix should reproduce the market's."""
+    from models.credit import calibrate_cutpoints, bucket_from_score
+    # 100 bonds: market says 40% A, 40% BBB, 20% BB. Scores span 0-99.
+    rows = []
+    for i in range(100):
+        market = 'A' if i >= 60 else ('BBB' if i >= 20 else 'BB')
+        rows.append({'issuer_credit_score': float(i), 'market_bucket': market})
+    cuts = calibrate_cutpoints(rows, min_per_bucket=10, min_rows=50)
+    assert cuts
+    mix = {}
+    for row in rows:
+        b = bucket_from_score(row['issuer_credit_score'], cuts)
+        mix[b] = mix.get(b, 0) + 1
+    # High-yield share should land near the market's 20%, not the seed's ~50%.
+    hy = sum(mix.get(b, 0) for b in ('BB', 'B', 'CCC'))
+    assert 10 <= hy <= 35, mix
+
+
+def test_calibration_keeps_cutpoints_strictly_decreasing():
+    """A non-monotone scorecard inverts the rating scale silently."""
+    from models.credit import CUTPOINT_PARAMS, calibrate_cutpoints
+    rows = [{'issuer_credit_score': float(i % 100),
+             'market_bucket': ['AAA', 'AA', 'A', 'BBB', 'BB', 'B'][i % 6]}
+            for i in range(600)]
+    cuts = calibrate_cutpoints(rows, min_per_bucket=10, min_rows=50)
+    values = [cuts[p] for p in CUTPOINT_PARAMS if p in cuts]
+    assert values == sorted(values, reverse=True)
+    assert len(set(values)) == len(values)
+
+
+def test_calibration_refuses_a_thin_sample():
+    from models.credit import calibrate_cutpoints
+    assert calibrate_cutpoints([{'issuer_credit_score': 50.0,
+                                 'market_bucket': 'A'}] * 10) == {}

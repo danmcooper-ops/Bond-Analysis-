@@ -344,50 +344,72 @@ def bucket_trend(score_now, score_prior, years=1.0):
 # Calibration
 # ---------------------------------------------------------------------------
 
-def calibrate_cutpoints(rows, bucket_oas, term_points=None, wedge=None,
-                        beta=1.0, min_per_bucket=25):
-    """Choose cutpoints so each implied bucket's spread matches the market's.
+def calibrate_cutpoints(rows, min_per_bucket=25, min_rows=300):
+    """Place the cutpoints so the model's bucket mix matches the market's.
 
-    Rather than fitting six free parameters, this assigns each bond the bucket
-    whose fair spread its OWN observed spread is closest to, then reads off
-    the credit-score quantiles those assignments imply. The result is a
-    scorecard whose buckets mean what the market means by them.
+    WHY THE SEED VALUES WERE WRONG, AND WHY IT WAS NOT THE SCORE'S FAULT.
+    The scorecard ranks credit risk correctly: median observed spread rises
+    monotonically across its buckets (51, 61, 71, 73, 94, 102, 120bp) and the
+    score-to-spread rank correlation is -0.43. What was broken was where the
+    cutpoints sat. The seeds (88/78/66/52/38/24) split a roughly uniform score
+    distribution into sevenths, which assigned 51% of the universe to high
+    yield when the market prices only 23% there — and put 258 bonds in CCC,
+    where the market saw three. Those "CCC" bonds trade at 120bp. The real
+    CCC index is 1023bp. The model was calling ordinary investment-grade
+    credits distressed.
 
-    Returns {param_name: cutpoint} for the buckets with enough population, and
-    leaves the rest at their defaults — a cutpoint fitted to nine bonds is
-    worse than the seed value.
+    A ranking that is right with labels that are wrong is worse than useless,
+    because every downstream consumer reads the label: fair_spread multiplies
+    by the bucket's index OAS, so a mislabelled BBB gets a CCC's 1023bp fair
+    spread and looks absurdly rich.
+
+    THE METHOD is distribution matching against the market's own opinion.
+    Each bond's market-implied bucket is read from its own spread, giving the
+    mix the market actually prices. The cutpoints are then the corresponding
+    quantiles of the credit-score distribution. The result is a scorecard
+    whose "BBB" means what the market means by BBB — self-consistent, and
+    built from free data alone.
+
+    Deliberately NOT fitted to forward returns. This aligns the LABELS with
+    market convention; whether the ranking predicts returns is a separate
+    question the backtest asks, and conflating the two would let a
+    return-fitted cutpoint smuggle in look-ahead.
     """
-    by_bucket = {}
-    for row in rows:
-        score = row.get('issuer_credit_score')
-        z = row.get('z_spread')
-        ttm = row.get('years_to_maturity')
-        if score is None or z is None or ttm is None:
-            continue
-        market = market_implied_bucket(z, ttm, bucket_oas,
-                                       term_points=term_points, wedge=wedge,
-                                       beta=beta)
-        if market:
-            by_bucket.setdefault(market, []).append(score)
+    scored = [r for r in rows
+              if r.get('issuer_credit_score') is not None
+              and r.get('market_bucket')]
+    if len(scored) < min_rows:
+        return {}
 
-    out = {}
-    # Walk best to worst; each cutpoint is the score below which the market
-    # stops treating an issuer as that bucket.
+    # The mix the market prices, as shares.
+    counts = {}
+    for row in scored:
+        counts[row['market_bucket']] = counts.get(row['market_bucket'], 0) + 1
+    total = len(scored)
+
+    scores = sorted(r['issuer_credit_score'] for r in scored)
+
+    # Walk best to worst, accumulating share, and read the score quantile at
+    # each boundary. Scores are ordered ascending, so the AAA boundary sits at
+    # the TOP of the distribution.
+    out, cumulative = {}, 0.0
     for bucket, param in zip(CREDIT_BUCKETS[:-1], CUTPOINT_PARAMS):
-        scores = sorted(by_bucket.get(bucket, []))
-        if len(scores) < min_per_bucket:
+        cumulative += counts.get(bucket, 0) / total
+        if counts.get(bucket, 0) < min_per_bucket:
+            # Too thin to place a boundary on; leave it to the monotonicity
+            # pass below rather than fitting a cutpoint to a handful of bonds.
             continue
-        out[param] = round(scores[len(scores) // 10], 1)   # 10th percentile
+        index = int(round((1.0 - cumulative) * (len(scores) - 1)))
+        out[param] = round(scores[max(0, min(index, len(scores) - 1))], 1)
 
     # Cutpoints must strictly decrease or the scale inverts. Enforce here
     # rather than letting validate_params reject the whole set later.
-    ordered = {}
-    ceiling = 100.0
+    ordered, ceiling = {}, 100.0
     for param in CUTPOINT_PARAMS:
         value = out.get(param)
         if value is None:
             continue
-        value = min(value, ceiling - 1.0)
+        value = min(value, ceiling - 0.5)
         ordered[param] = round(value, 1)
         ceiling = value
     return ordered
