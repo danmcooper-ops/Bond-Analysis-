@@ -1,0 +1,19 @@
+{
+  "_README": "CUSIP6 -> issuer key (a ticker in the fundamentals index). Hand-curated, and the highest-confidence path in the crosswalk: an entry here resolves at 1.00 and skips every heuristic. Seeded from the largest unresolved issuers by held value, which build_universe.py prints on every run — each line of that list is one entry here. Verify before adding: a wrong entry is worse than no entry, because it attaches the wrong company's leverage to a bond and the model then reports it with full confidence.",
+
+  "_SUPRANATIONALS": "Development banks and multilateral issuers. They file no US financial statements, so no ticker can be given and no fundamentals exist. Listed here as documentation of a deliberate decision, NOT as matches - the value is null so they stay unresolved and lose their credit gates rather than being silently mapped to something wrong. Collectively over $8bn of the unresolved band.",
+  "459058": null,
+  "298785": null,
+  "045167": null,
+  "45818W": null,
+  "219868": null,
+
+  "_SUBSIDIARIES": "Issuers whose name shares no usable token with the parent, or whose name is too short for the token matcher (HCA is 3 characters). The parent guarantees the debt in each case.",
+  "404119": "HCA",
+  "1248EP": "CHTR",
+  "161175": "CHTR",
+
+  "_FOREIGN_PARENTS": "US financing arms of foreign parents that trade on US OTC markets. Verify the ticker actually carries fundamentals before adding more - several foreign parents are in company_tickers.json but have no usable financials.",
+
+  "_NOT_IN_ANY_INDEX": "CVS Health (126650), Pacific Gas & Electric (694308), HSBC Holdings (404280), Barclays (06738E), Toyota Motor Credit (89236T) and American Honda Finance (02665W) are absent from the equity model's screened universe. They are real SEC filers, so a XBRL backend would recover them; until then they correctly resolve to nothing and lose their credit gates rather than being guessed at."
+}
