@@ -155,10 +155,29 @@ def _score_linear(value, worst, best):
     """Map value linearly from [worst, best] to [0, 100], clamped.
 
     `worst` may exceed `best` for lower-is-better metrics; the clamp handles
-    both directions. Returns None only for a None input, so a caller can tell
+    both directions. Returns None for a missing input, so a caller can tell
     "missing" from "scored zero".
+
+    NaN IS TREATED AS MISSING, and this is load-bearing rather than tidiness.
+    Missing values read out of a parquet column arrive as float('nan'), not
+    None — `nan is None` is False, so a NaN sails past every guard. It then
+    reaches the clamp, and because every NaN comparison is False,
+    `min(100.0, nan)` returns 100.0: a missing metric scores PERFECT.
+
+    That is not hypothetical. Bonds whose issuer could not be identified — no
+    coverage, no leverage, no Altman-Z, nothing — came back from the credit
+    scorecard as AAA with full confidence, because all six missing factors
+    scored 100. Roughly 6,000 of them. A silent inversion like this is far
+    worse than a crash: the model was most confident exactly where it knew
+    least.
     """
     if value is None:
+        return None
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return None
+    if value != value:                      # NaN
         return None
     if best == worst:
         return 50.0

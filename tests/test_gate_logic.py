@@ -161,15 +161,51 @@ def test_bank_swaps_the_credit_scorecard_rather_than_losing_it():
     assert 'Credit: Rating Divergence' in names
 
 
-def test_low_match_confidence_masks_the_credit_gates():
-    """A wrong issuer match is worse than no match: it attaches another
-    company's leverage to this bond."""
-    row = corporate_row(cusip_match_confidence=0.55)
+def test_unidentified_issuers_are_penalised_not_excused():
+    """A corporate bond ALWAYS has an issuer whose leverage matters. If we
+    cannot identify it that is MISSING DATA — scored zero, kept in the
+    denominator — not a question that fails to apply.
+
+    Masking these instead inverted the ranking: dropping the Credit category
+    (whose gates average 33-48) let the composite renormalise over the
+    higher-scoring categories, so bonds we knew nothing about rose to the top.
+    Thirteen of the first corporate run's top fourteen names were
+    unidentifiable high-coupon high-yield paper."""
+    row = corporate_row(cusip_match_confidence=0.55, issuer_cik=None,
+                        issuer_int_cov=None, issuer_nd_ebitda=None,
+                        issuer_altman_z=None)
     names = _applicable_names(row)
-    assert 'Credit: Int Coverage' not in names
-    assert 'Valuation: Spread vs Fair' not in names
-    # Non-issuer questions still apply.
+    assert 'Credit: Int Coverage' in names        # applies, and will score 0
+    assert 'Valuation: Spread vs Fair' in names
     assert 'Rates: Duration Fit' in names
+
+    scored = [dict(row)]
+    compute_continuous_scores(scored, SPEC)
+    assert scored[0]['_score_int_coverage'] == 0.0
+    assert 'Credit' in scored[0]['_composite_categories']
+
+
+def test_an_unidentified_issuer_scores_below_an_identified_one():
+    """The direct consequence: not knowing an issuer must cost the bond, not
+    reward it."""
+    known = [corporate_row()]
+    unknown = [corporate_row(cusip_match_confidence=0.40, issuer_cik=None,
+                             issuer_int_cov=None, issuer_nd_ebitda=None,
+                             issuer_altman_z=None, issuer_fcf_to_debt=None,
+                             bucket_divergence_notches=None)]
+    compute_continuous_scores(known, SPEC)
+    compute_continuous_scores(unknown, SPEC)
+    assert unknown[0]['_composite_score'] < known[0]['_composite_score']
+
+
+def test_bank_only_gates_still_require_a_known_financial_issuer():
+    """CET1 is meaningless for anything but a bank, and an unidentified issuer
+    is assumed non-financial — so those gates mask rather than score zero."""
+    row = corporate_row(cusip_match_confidence=0.55, issuer_cik=None,
+                        issuer_sector=None)
+    names = _applicable_names(row)
+    assert 'Credit: CET1' not in names
+    assert 'Credit: NPL Ratio' not in names
 
 
 def test_floater_masks_the_rates_gates():
@@ -220,10 +256,22 @@ def test_every_score_fn_stays_in_range_across_extremes(gate):
 
 
 @pytest.mark.parametrize('gate', GATES, ids=lambda g: _gate_short(g.name))
-def test_every_score_fn_survives_nan(gate):
+def test_nan_is_treated_as_missing_not_as_a_perfect_score(gate):
+    """NaN must score None, never a number. Missing values from a parquet
+    column arrive as NaN, and because every NaN comparison is False,
+    `min(100.0, nan)` returns 100.0 — a missing metric scoring PERFECT.
+    That silently rated ~6,000 issuer-less bonds AAA with full confidence."""
     row = corporate_row()
     score = gate.score_fn(float('nan'), row, 50.0)
-    assert score is None or 0.0 <= score <= 100.0 or score != score
+    assert score is None, f'{gate.name} scored {score} on NaN'
+
+
+def test_score_linear_rejects_nan_directly():
+    from scripts.scoring_kernel import _score_linear
+    assert _score_linear(float('nan'), 0.0, 10.0) is None
+    assert _score_linear(None, 0.0, 10.0) is None
+    assert _score_linear('not a number', 0.0, 10.0) is None
+    assert _score_linear(5.0, 0.0, 10.0) == 50.0
 
 
 def test_all_missing_row_does_not_crash():
@@ -392,3 +440,19 @@ def test_a_treasury_is_not_capped_by_corporate_only_checks():
     prepare_scoring_fields([row])
     cap, reasons = rating_cap_for_row(row)
     assert cap is None, reasons
+
+
+def test_government_paper_keeps_its_asset_class_through_the_credit_model():
+    """A Treasury has no issuer balance sheet, so the scorecard returns no
+    bucket — and an unknown bucket defaults to CORP_IG. Running government
+    paper through it relabelled all 402 Treasuries as corporates in a combined
+    run, destroying the masking that gives them a rating scale."""
+    from scripts.analyze_bonds import apply_credit_model
+    rows = [treasury_row(asset_class='TREASURY'),
+            treasury_row(asset_class='TREASURY_BILL'),
+            corporate_row()]
+    apply_credit_model(rows, {})
+    assert rows[0]['asset_class'] == 'TREASURY'
+    assert rows[1]['asset_class'] == 'TREASURY_BILL'
+    assert rows[2]['asset_class'] in ('CORP_IG', 'CORP_HY')
+    assert 'implied_bucket' not in rows[0]

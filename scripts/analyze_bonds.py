@@ -45,7 +45,7 @@ from data.mspd_client import MSPDClient
 from data.treasury_curve_client import TreasuryCurveClient
 from data.treasury_direct_client import TreasuryDirectClient
 from models.bond_types import from_row
-from models import discount
+from models import credit, discount
 from models.curve import YieldCurve
 from models.pricing import (bond_flows_and_stub, current_yield,
                             price_from_yield, yield_from_price,
@@ -184,6 +184,123 @@ def attach_nport_marks(rows, as_of, quarter=None):
 
     log.info('N-PORT marks attached to %d of %d rows', matched, len(rows))
     return matched
+
+
+def load_corporate_universe(quarter):
+    """Read the universe built by scripts/build_universe.py."""
+    path = os.path.join(OUTPUT_DIR, f'universe_{quarter}.parquet')
+    if not os.path.exists(path):
+        raise SystemExit(f'[fatal] {path} not found — run '
+                         f'scripts/build_universe.py --quarter {quarter}')
+    import pandas as pd
+    frame = pd.read_parquet(path)
+    # Parquet returns missing numerics as NaN, and NaN is not None: it passes
+    # every `is None` guard downstream. Coerced at the boundary so the rest of
+    # the pipeline sees one representation of "absent".
+    rows = frame.astype(object).where(pd.notna(frame), None).to_dict('records')
+    for row in rows:
+        for field in ('maturity_date', 'report_date', 'mark_date'):
+            value = row.get(field)
+            if value is not None and hasattr(value, 'date'):
+                row[field] = value.date()
+    log.info('Corporate universe %s: %d bonds', quarter, len(rows))
+    return rows
+
+
+def apply_credit_model(rows, params):
+    """Phase 2: issuer credit score -> implied bucket -> asset class.
+
+    Runs BEFORE the analytics because the bucket decides whether a bond is
+    investment grade or high yield, and that in turn drives its peer pool.
+    The MARKET-implied bucket has to wait until after the analytics, since it
+    is read off the Z-spread the analytics produce.
+    """
+    scored = 0
+    skipped_government = 0
+    for row in rows:
+        # Government and agency paper has no issuer balance sheet, and its
+        # asset class is already known from the CUSIP. Running it through the
+        # scorecard would relabel every Treasury CORP_IG (the default for an
+        # unknown bucket) and silently destroy the masking that gives them a
+        # rating scale at all — 402 Treasuries vanished from a combined run
+        # this way before the guard existed.
+        if (row.get('asset_class') or '').startswith(('TREASURY', 'AGENCY')):
+            skipped_government += 1
+            continue
+
+        fundamentals = {
+            'int_cov': row.get('issuer_int_cov'),
+            'nd_ebitda': row.get('issuer_nd_ebitda'),
+            'fcf': row.get('issuer_fcf_to_debt'),   # already a ratio
+            'total_debt': 1.0 if row.get('issuer_fcf_to_debt') is not None else None,
+            'altman_z': row.get('issuer_altman_z'),
+            'revenue': row.get('issuer_revenue'),
+            'piotroski': row.get('issuer_piotroski'),
+            'cet1_ratio': row.get('issuer_cet1_ratio'),
+            'npl_ratio': row.get('issuer_npl_ratio'),
+            'sector': row.get('issuer_sector'),
+        }
+        result = credit.implied_bucket(fundamentals,
+                                       sector=row.get('issuer_sector'),
+                                       params=params)
+        row['issuer_credit_score'] = result.get('score')
+        row['issuer_credit_coverage'] = result.get('coverage')
+        row['issuer_scorecard'] = result.get('scorecard')
+        row['implied_bucket'] = result.get('bucket')
+        row['_credit_confident'] = result.get('confident', False)
+        row['asset_class'] = credit.asset_class_for(result.get('bucket'))
+        if result.get('bucket'):
+            scored += 1
+
+    log.info('Credit model: %d of %d bonds have an implied bucket '
+             '(%d government rows left untouched)',
+             scored, len(rows) - skipped_government, skipped_government)
+    return rows
+
+
+def apply_fair_value(row, ctx, params, flows, settle):
+    """Fair spread, fair price, mispricing and divergence for one bond.
+
+    Runs after the Z-spread exists. Everything here is relative value: the
+    bond's own spread against what an issuer of this quality and this tenor
+    should be paying, per the market's own published pricing of that quality.
+    """
+    bucket = row.get('implied_bucket')
+    ttm = row.get('years_to_maturity')
+    observed_z = row.get('z_spread')
+    beta = (params or {}).get('fair_spread_term_beta', 1.0)
+
+    fair_z = credit.fair_spread(bucket, ttm, ctx.get('bucket_oas'),
+                                term_points=ctx.get('term_points'),
+                                wedge=ctx.get('wedge'), beta=beta)
+    row['fair_spread'] = fair_z
+    row['spread_mispricing'] = credit.spread_mispricing(observed_z, fair_z)
+
+    if fair_z is not None:
+        fair_dirty = credit.fair_price(flows, settle, ctx['curve'], fair_z)
+        if fair_dirty is not None:
+            fair_clean = fair_dirty - (row.get('accrued') or 0.0)
+            row['fair_price'] = fair_clean
+            row['price_mispricing'] = credit.price_mispricing(
+                row.get('clean_price_est'), fair_clean)
+
+    market = credit.market_implied_bucket(
+        observed_z, ttm, ctx.get('bucket_oas'),
+        term_points=ctx.get('term_points'), wedge=ctx.get('wedge'), beta=beta)
+    row['market_bucket'] = market
+
+    gap = credit.divergence(bucket, market,
+                            fundamentals_asof=row.get('_fundamentals_asof'),
+                            mark_date=row.get('mark_date'))
+    row['bucket_divergence_notches'] = gap['notches']
+    row['divergence_label'] = gap['label']
+    row['_divergence_stale_risk'] = gap['stale_risk']
+    # A divergence built from fundamentals NEWER than the price is comparing
+    # two different moments; the gate must not read our own data lag as a
+    # credit signal.
+    if gap['stale_risk']:
+        row['bucket_divergence_notches'] = None
+    return row
 
 
 def load_treasury_universe(as_of, max_years=31):
@@ -332,6 +449,13 @@ def analyze_bond(row, ctx, settle, params):
         return None
 
     curve = ctx['curve']
+    # Write the PARSED terms back onto the row. N-PORT reports the coupon in
+    # percent and from_row normalises it to a decimal; leaving the raw value
+    # in place makes every downstream consumer — report, snapshot, backtest —
+    # read an 8.875% bond as 887.5%.
+    row['coupon_rate'] = bond.coupon_rate
+    row['frequency'] = bond.frequency
+    row['convention'] = bond.convention
     row['years_to_maturity'] = ttm = years_to_maturity(settle, bond.maturity)
     row['_front_end_yield'] = ctx['front_end_yield']
     row['_curve_regime'] = ctx['regime']
@@ -401,6 +525,10 @@ def analyze_bond(row, ctx, settle, params):
     # -- carry and roll ------------------------------------------------------
     row['carry_12m'] = carry(bond.coupon_rate, dirty, 365, face=bond.face)
     row['roll_down_12m'] = roll_down(curve, ttm, 1.0, mod)
+
+    # -- relative value ------------------------------------------------------
+    if row.get('implied_bucket') or row.get('z_spread') is not None:
+        apply_fair_value(row, ctx, params, flows, settle)
 
     return row
 
@@ -632,8 +760,10 @@ def main():
     ap = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('--universe', default='treasury', choices=['treasury'],
-                    help='corporate universes arrive at M6')
+    ap.add_argument('--universe', default='treasury',
+                    choices=['treasury', 'corporate', 'all'])
+    ap.add_argument('--quarter', default='2026q2',
+                    help='N-PORT quarter backing the corporate universe')
     ap.add_argument('--as-of', type=lambda s: datetime.strptime(s, '%Y-%m-%d').date(),
                     default=None)
     ap.add_argument('--max-years', type=int, default=31)
@@ -659,11 +789,18 @@ def main():
     ctx = build_context(settle, use_fred=not args.no_fred)
 
     log.info('Phase 1: universe (%s)', args.universe)
-    raw = load_treasury_universe(settle, max_years=args.max_years)
+    raw = []
+    if args.universe in ('treasury', 'all'):
+        raw += load_treasury_universe(settle, max_years=args.max_years)
+    if args.universe in ('corporate', 'all'):
+        raw += load_corporate_universe(args.quarter)
     log.info('  %d reference rows', len(raw))
 
     if not args.no_marks:
         attach_nport_marks(raw, settle, quarter=args.marks)
+
+    log.info('Phase 2: credit model')
+    apply_credit_model(raw, params)
 
     log.info('Phase 3: analytics')
     rows, dropped = [], Counter()

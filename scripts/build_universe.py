@@ -125,7 +125,17 @@ def build(quarter, as_of, min_funds, min_held, audit=0):
     log.info('%s: %d corporate CUSIPs after de-duplicating to the latest month',
              quarter, len(corporates))
 
-    fundamentals = IssuerFundamentals()
+    # Fundamentals are read AS OF the marks, not as of today. N-PORT marks are
+    # ~98 days old, and comparing a current balance sheet against a stale price
+    # measures our data lag rather than any divergence — the stale-risk guard
+    # correctly suppressed the signal for every bond until this existed.
+    mark_dates = [m.get('report_date') for m in corporates if m.get('report_date')]
+    mark_dates = [d.date() if hasattr(d, 'date') else d for d in mark_dates]
+    fundamentals_asof = max(mark_dates) if mark_dates else as_of
+    log.info('Reading fundamentals as of %s (newest mark date), not %s',
+             fundamentals_asof, as_of)
+
+    fundamentals = IssuerFundamentals(as_of=fundamentals_asof)
     crosswalk = CusipCrosswalk(index=fundamentals.names())
     filer_crosswalk = CusipCrosswalk(index=load_sec_filers())
 
@@ -184,7 +194,7 @@ def build(quarter, as_of, min_funds, min_held, audit=0):
         row['coupon_rate'] = mark.get('annualized_rate')
 
         resolution = resolutions.get(mark['cusip'][:6].upper(), {})
-        fundamentals.attach(row, resolution, as_of)
+        fundamentals.attach(row, resolution, report_date)
         rows.append(row)
 
     log.info('Universe: %d bonds (%d filtered out)', len(rows),

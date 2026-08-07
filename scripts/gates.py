@@ -66,20 +66,44 @@ def _appl_has_issuer(r):
 
 
 def _appl_credit_fund(r):
-    return _appl_credit(r) and _appl_has_issuer(r)
+    """Credit gates apply to any CORPORATE bond, whether or not we can price
+    its issuer.
+
+    This deliberately does NOT require the issuer to be identified, and the
+    distinction is the whole applicable-vs-missing doctrine applied honestly.
+    A Treasury has no issuer balance sheet — the question is meaningless, so
+    the gate masks. A corporate bond ALWAYS has an issuer whose leverage
+    matters; if we cannot identify it, that is missing data, and missing data
+    scores zero and stays in the denominator.
+
+    Getting this backwards inverted the model. Masking credit gates for
+    unidentified issuers dropped the whole Credit category, whose gates
+    average 33-48, and the composite renormalised over the remaining
+    higher-scoring categories. Bonds we knew NOTHING about therefore rose to
+    the top of the ranking — thirteen of the top fourteen names, all
+    high-coupon high-yield paper with an unidentifiable issuer. The caps
+    caught them, so nothing wrong shipped, but the ranking beneath the caps
+    was upside down.
+    """
+    return _appl_credit(r)
 
 
 def _appl_corp_nonfin(r):
     """Banks and insurers need the financial scorecard, not this one: their
     operating cash flow reflects deposit and loan movements, and EBITDA is not
     a meaningful denominator. Same reasoning as the equity model's
-    _appl_non_financial mask."""
+    _appl_non_financial mask.
+
+    An unidentified issuer has no known sector and lands here, the modal case,
+    where its missing metrics score zero rather than escaping assessment."""
     return (_appl_credit_fund(r)
             and r.get('issuer_sector') != FINANCIAL_SECTOR_NAME)
 
 
 def _appl_corp_financial(r):
-    return (_appl_credit_fund(r)
+    # Requires a KNOWN financial issuer: CET1 and NPL are only meaningful for
+    # a bank, and an unidentified issuer is assumed non-financial above.
+    return (_appl_credit_fund(r) and _appl_has_issuer(r)
             and r.get('issuer_sector') == FINANCIAL_SECTOR_NAME)
 
 
@@ -95,6 +119,45 @@ def _appl_fixed_coupon(r):
         return False
     ctype = (r.get('coupon_type') or 'Fixed').strip().lower()
     return ctype in ('fixed', 'none', '')
+
+
+def _appl_issuer_field(row, *fields):
+    """Does this row's data vintage carry every field the gate needs?
+
+    Distinct from the value being absent for one issuer. A field the snapshot
+    never had is structurally unmeasurable — the 2026-04 equity vintage has no
+    cet1_ratio at all — so scoring every matched issuer zero on it would drag
+    the whole Credit category down while discriminating between nobody.
+    """
+    available = row.get('_issuer_fields')
+    if available is None:
+        return True          # unknown vintage: assume present, score normally
+    # A tuple written to parquet comes back as a numpy array, where truthiness
+    # raises rather than returning False. Normalise before testing.
+    try:
+        available = set(available)
+    except TypeError:
+        return True
+    if not available:
+        return True
+    return all(f in available for f in fields)
+
+
+def _appl_fcf_to_debt(r):
+    return _appl_corp_nonfin(r) and _appl_issuer_field(r, 'fcf', 'total_debt')
+
+
+def _appl_maturity_wall(r):
+    return (_appl_credit_fund(r)
+            and _appl_issuer_field(r, 'debt_maturity_wall_yrs'))
+
+
+def _appl_cet1(r):
+    return _appl_corp_financial(r) and _appl_issuer_field(r, 'cet1_ratio')
+
+
+def _appl_npl(r):
+    return _appl_corp_financial(r) and _appl_issuer_field(r, 'npl_ratio')
 
 
 def _appl_issuer_trend(r):
@@ -140,7 +203,7 @@ def _score_duration_vs_regime(v, r, pct):
     scores 50 and the gate is silent, which is the correct behaviour when the
     curve is not saying anything.
     """
-    if v is None:
+    if v is None or (isinstance(v, float) and v != v):
         return None
     regime = r.get('_curve_regime') or {}
     slope = regime.get('slope_10y_3m')
@@ -159,6 +222,14 @@ def _score_duration_vs_regime(v, r, pct):
     return 100.0 * (d * appetite + (1.0 - d) * (1.0 - appetite))
 
 
+def _percentile(v, r, pct):
+    """For peer-ranked gates: the percentile is the score, but only when the
+    underlying value actually exists. A NaN value must not inherit a rank."""
+    if v is None or (isinstance(v, float) and v != v):
+        return None
+    return pct
+
+
 def _pass_through(v, r, pct):
     """For fields already expressed on the 0-100 scale.
 
@@ -170,9 +241,12 @@ def _pass_through(v, r, pct):
     if v is None:
         return None
     try:
-        return max(0.0, min(100.0, float(v)))
+        value = float(v)
     except (TypeError, ValueError):
         return None
+    if value != value:            # NaN is missing, not a perfect score
+        return None
+    return max(0.0, min(100.0, value))
 
 
 def _score_carry_and_roll(v, r, pct):
@@ -181,7 +255,7 @@ def _score_carry_and_roll(v, r, pct):
     The comparison matters: 400bp of carry is unimpressive when the 3-month
     bill pays 390bp. The gate scores the excess.
     """
-    if v is None:
+    if v is None or (isinstance(v, float) and v != v):
         return None
     front = r.get('_front_end_yield')
     excess = v - front if front is not None else v
@@ -208,7 +282,7 @@ GATES = [
          applicable=_appl_credit_fund),
     Gate('Valuation: Spread Percentile', 'z_spread',
          lambda v, r: v is not None and v > 0,
-         lambda v, r, pct: pct,
+         _percentile,
          relative_mode='peer', higher_better=True, applicable=_appl_credit),
     Gate('Valuation: Yield over Tsy', 'yield_over_treasury',
          lambda v, r: v > 100 * _bp if v is not None else None,
@@ -233,7 +307,7 @@ GATES = [
     Gate('Credit: FCF to Debt', 'issuer_fcf_to_debt',
          lambda v, r: v > 0.10 if v is not None else None,
          lambda v, r, pct: _score_linear(v, -0.05, 0.35),
-         applicable=_appl_corp_nonfin),
+         applicable=_appl_fcf_to_debt),
     Gate('Credit: Altman Z', 'issuer_altman_z',
          lambda v, r: v > 2.6 if v is not None else None,
          lambda v, r, pct: _score_linear(v, 1.1, 5.0),
@@ -252,11 +326,11 @@ GATES = [
     Gate('Credit: CET1', 'issuer_cet1_ratio',
          lambda v, r: v > 0.11 if v is not None else None,
          lambda v, r, pct: _score_linear(v, 0.06, 0.16),
-         weight=1.5, applicable=_appl_corp_financial),
+         weight=1.5, applicable=_appl_cet1),
     Gate('Credit: NPL Ratio', 'issuer_npl_ratio',
          lambda v, r: v < 0.01 if v is not None else None,
          lambda v, r, pct: _score_linear(v, 0.05, 0.003),
-         weight=1.5, applicable=_appl_corp_financial),
+         weight=1.5, applicable=_appl_npl),
 
     # ---- Rates (0.16) ----------------------------------------------------
     Gate('Rates: Duration Fit', 'modified_duration',
@@ -266,7 +340,7 @@ GATES = [
     # Per unit of duration, so a 30-year does not win on term alone.
     Gate('Rates: Convexity', 'convexity_per_duration',
          lambda v, r: v is not None and v > 0,
-         lambda v, r, pct: pct,
+         _percentile,
          relative_mode='peer', higher_better=True, applicable=_appl_fixed_coupon),
     Gate('Rates: Roll Down', 'roll_down_12m',
          lambda v, r: v > 0 if v is not None else None,
@@ -288,7 +362,7 @@ GATES = [
     Gate('Structure: Maturity Wall', 'wall_vs_own_maturity',
          lambda v, r: v > 0 if v is not None else None,
          lambda v, r, pct: _score_linear(v, -2.0, 3.0),
-         applicable=_appl_credit_fund),
+         applicable=_appl_maturity_wall),
     Gate('Structure: Payment Status', 'payment_status_score',
          lambda v, r: v >= 100 if v is not None else None,
          _pass_through,
@@ -306,7 +380,7 @@ GATES = [
          weight=1.5, applicable=_appl_fund_data),
     Gate('Liquidity: Held Value', 'total_held_usd',
          lambda v, r: v is not None and v > 50e6,
-         lambda v, r, pct: pct,
+         _percentile,
          relative_mode='peer', higher_better=True, applicable=_appl_fund_data),
     Gate('Liquidity: Mark Agreement', 'price_dispersion',
          lambda v, r: v < MAX_PRICE_DISPERSION if v is not None else None,

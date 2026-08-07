@@ -251,9 +251,14 @@ def test_rating_from_composite_boundaries_are_inclusive():
 
 def test_per_asset_class_thresholds_win_over_base():
     """Treasury composites are computed over a different category set, so they
-    need their own scale. A class override must beat the base threshold."""
-    params = {'rating_threshold_buy': 57, 'rating_threshold_buy_treasury': 70}
-    assert rating_from_composite(65, params, asset_class='CORP_IG') == 'BUY'
+    need their own scale. A class override must beat the base threshold.
+
+    Uses AGENCY as the control because every other class carries calibrated
+    thresholds in config, and a test that reads live config is testing the
+    calibration rather than the precedence logic."""
+    params = {'rating_threshold_buy': 57, 'rating_threshold_lean': 39,
+              'rating_threshold_buy_treasury': 70}
+    assert rating_from_composite(65, params, asset_class='AGENCY') == 'BUY'
     assert rating_from_composite(65, params, asset_class='TREASURY') == 'LEAN BUY'
     assert rating_from_composite(72, params, asset_class='TREASURY') == 'BUY'
 

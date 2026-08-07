@@ -62,6 +62,12 @@ MANIFEST = [
                 'cap function arrives on the spec; passes asset_class through',
             'gate_metadata':
                 'display maps and category order arrive on the spec',
+            '_score_linear':
+                'NaN is treated as missing and returns None. Upstream relies '
+                'on None-only inputs; here values arrive from parquet columns '
+                'where missing reads as NaN, which passed every guard and then '
+                'scored 100 because min(100.0, nan) is 100.0 — rating ~6,000 '
+                'issuer-less bonds AAA with full confidence',
             '_purge_stale_gate_fields': 'takes a spec instead of module GATES',
             'score_and_rate': 'threads the spec through',
         },
