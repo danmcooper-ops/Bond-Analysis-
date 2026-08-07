@@ -63,14 +63,19 @@ def newest_report():
 def ensure_worktree():
     """A worktree on `pages-live`, creating the orphan branch if needed."""
     if os.path.isdir(WORKTREE):
-        # A worktree left behind by an interrupted run is reusable, but only
-        # if it is genuinely on the publish branch.
+        # A directory left behind by an interrupted run is reusable only if it
+        # is genuinely a registered worktree on the publish branch. An orphan
+        # checkout that was interrupted leaves a plain directory that `git
+        # worktree remove` will not touch, so fall through to deleting it.
         head = git('rev-parse', '--abbrev-ref', 'HEAD', cwd=WORKTREE,
                    check=False, quiet=True)
-        if head.stdout.strip() == BRANCH:
+        if head.returncode == 0 and head.stdout.strip() == BRANCH:
             return
         log.warning('Stale worktree at %s; recreating', WORKTREE)
-        git('worktree', 'remove', '--force', WORKTREE, check=False)
+        git('worktree', 'remove', '--force', WORKTREE, check=False, quiet=True)
+        if os.path.isdir(WORKTREE):
+            shutil.rmtree(WORKTREE, ignore_errors=True)
+        git('worktree', 'prune', check=False, quiet=True)
 
     exists = git('rev-parse', '--verify', BRANCH, check=False,
                  quiet=True).returncode == 0

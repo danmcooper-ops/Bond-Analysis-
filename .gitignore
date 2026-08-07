@@ -14,3 +14,6 @@ data/cache/
 
 .env
 .DS_Store
+
+# Publish worktree, created and removed by scripts/publish.py
+.pages-live/
