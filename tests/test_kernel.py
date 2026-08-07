@@ -259,9 +259,29 @@ def test_per_asset_class_thresholds_win_over_base():
 
 
 def test_unset_class_override_falls_back_to_base():
-    params = default_params()          # every class override is None
+    """AGENCY deliberately: TREASURY carries calibrated thresholds in config,
+    and a test that silently tracks whatever calibration last ran is testing
+    the config file rather than the fallback logic."""
+    params = default_params()          # every per-class param is None
     params['rating_threshold_buy'] = 57
-    assert rating_from_composite(60, params, asset_class='TREASURY') == 'BUY'
+    assert rating_from_composite(60, params, asset_class='AGENCY') == 'BUY'
+
+
+def test_config_class_thresholds_are_consulted_when_params_are_silent():
+    """The calibrated thresholds in config.py must actually take effect, not
+    just sit there — params override config, config overrides the base."""
+    from scripts.config import RATING_THRESHOLDS_BY_CLASS
+    cuts = RATING_THRESHOLDS_BY_CLASS.get('TREASURY') or {}
+    if not cuts:
+        pytest.skip('no calibrated Treasury thresholds in config')
+    params = default_params()
+    params['rating_threshold_buy'] = 57
+    just_under = cuts['buy'] - 0.5
+    assert just_under > 57, 'test assumes a calibrated cut above the base'
+    assert rating_from_composite(just_under, params,
+                                 asset_class='TREASURY') != 'BUY'
+    assert rating_from_composite(cuts['buy'], params,
+                                 asset_class='TREASURY') == 'BUY'
 
 
 # ---------------------------------------------------------------------------

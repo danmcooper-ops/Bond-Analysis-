@@ -267,6 +267,16 @@ def compute_continuous_scores(results, spec, params=None):
     their own weights. Upstream marks this path "unreachable with current
     masks — defensive only". Here it is the normal path for every Treasury.
     """
+    # Derived fields must exist before any gate reads them. Both this and
+    # apply_screening_matrix call prepare_fn rather than one depending on the
+    # other having run: an applicability predicate reading a field that
+    # prepare_fn had not yet computed would not error, it would silently
+    # return False and mask the gate — a whole category quietly vanishing
+    # because two functions were called in the wrong order. prepare_fn is
+    # required to be idempotent (tested), so the extra pass is safe.
+    if spec.prepare_fn is not None:
+        spec.prepare_fn(results)
+
     # Step 1: percentile ranks for relative gates.
     for gate in spec.gates:
         if not gate.relative_mode:

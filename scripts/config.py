@@ -32,10 +32,11 @@ RATING_THRESHOLD_PASS = 25
 # Populated by calibrate.py; kept explicit from v1 so the comparability
 # problem can never be silently ignored.
 RATING_THRESHOLDS_BY_CLASS = {
-    'TREASURY': {},
+    'TREASURY': {'buy': 71.7, 'lean': 64.1, 'pass': 52.5},
     'AGENCY': {},
     'CORP_IG': {},
     'CORP_HY': {},
+    'TREASURY_BILL': {'buy': 71.7, 'lean': 64.1, 'pass': 52.5},
 }
 
 # ---------------------------------------------------------------------------

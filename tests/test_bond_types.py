@@ -162,10 +162,25 @@ def test_explicit_frequency_overrides_the_table():
     assert conventions_for('CORP_IG', frequency=1)['frequency'] == 1
 
 
-def test_zero_coupon_forces_a_discount_instrument():
-    conv = conventions_for('CORP_IG', coupon_rate=0.0)
-    assert conv['frequency'] == 0
-    assert conv['comp'] == 'simple'
+def test_zero_coupon_splits_by_tenor_not_by_coupon():
+    """The obvious rule — no coupon means frequency 0 — is wrong for long
+    zeros. A 10-year STRIP is quoted bond-equivalent semiannual; forcing it to
+    frequency 0 sends it down the single-period discount path, where it prices
+    as though it matured in six months (a 10-year zero came back at a 60%
+    yield with 0.63 duration)."""
+    short = conventions_for('CORP_IG', coupon_rate=0.0, years_to_maturity=0.5)
+    assert short['frequency'] == 0
+    assert short['comp'] == 'simple'
+
+    long = conventions_for('CORP_IG', coupon_rate=0.0, years_to_maturity=10.0)
+    assert long['frequency'] == 2
+    assert long['comp'] == 'semiannual'
+
+
+def test_declared_bills_are_money_market_whatever_their_remaining_life():
+    conv = conventions_for('TREASURY_BILL', coupon_rate=0.0,
+                           years_to_maturity=0.02)
+    assert conv['frequency'] == 0 and conv['comp'] == 'simple'
 
 
 def test_is_analyzable():

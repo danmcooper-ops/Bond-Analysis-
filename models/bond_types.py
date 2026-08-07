@@ -124,8 +124,12 @@ def from_row(row, settle=None):
     asset_class = (row.get('asset_class')
                    or classify_by_cusip(cusip)
                    or 'CORP_IG')
+    # Tenor decides whether a zero is money-market or bond-equivalent, so it
+    # has to reach conventions_for.
+    ttm = (maturity - settle).days / 365.25 if settle is not None else None
     conv = conventions_for(asset_class, coupon_rate=coupon,
-                           frequency=row.get('frequency'))
+                           frequency=row.get('frequency'),
+                           years_to_maturity=ttm)
 
     return Bond(
         cusip=cusip,

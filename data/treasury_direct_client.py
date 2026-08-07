@@ -117,6 +117,17 @@ def _parse_rate(value):
         return None
 
 
+def _parse_amount(value):
+    """Dollar amounts arrive as strings ('33999000000.000000')."""
+    if value in (None, ''):
+        return None
+    try:
+        amount = float(str(value).replace(',', ''))
+    except (TypeError, ValueError):
+        return None
+    return amount if amount > 0 else None
+
+
 class TreasuryDirectClient:
     """Fetches auctioned Treasury reference data, cached to disk."""
 
@@ -259,6 +270,8 @@ class TreasuryDirectClient:
                      '(reopenings collapsed)', len(records), len(deduped))
 
         out = []
+        skipped_unissued = 0
+        skipped_no_coupon = 0
         for rec in deduped:
             maturity = _parse_date(rec.get('maturityDate'))
             if maturity is None or maturity <= target:
@@ -266,16 +279,36 @@ class TreasuryDirectClient:
             sec_type = instrument_type(rec)
             inflation_linked = is_inflation_linked(rec)
             floating = is_floating_rate(rec)
+            # Not yet issued: an announced auction that has not settled is not
+            # something anyone can own. TreasuryDirect returns forthcoming
+            # auctions alongside outstanding paper, with a blank interestRate
+            # because the coupon is set AT the auction. Reading that blank as
+            # a 0% coupon produced a "3-Year Note" yielding 13.8% and a
+            # "10-Year" yielding 60% at the top of the BUY list.
+            issue_date = (_parse_date(rec.get('originalIssueDate'))
+                          or _parse_date(rec.get('issueDate')))
+            if issue_date is not None and issue_date > target:
+                skipped_unissued += 1
+                continue
+
             coupon = _parse_rate(rec.get('interestRate'))
             freq_raw = (rec.get('interestPaymentFrequency') or '').strip().lower()
             frequency = FREQUENCY_MAP.get(freq_raw)
 
+            is_discount = sec_type in ('Bill', 'CMB')
             if coupon is None:
-                # Bills carry no coupon; the field is blank, not zero.
-                coupon = 0.0
-                frequency = 0
+                if is_discount:
+                    # Bills genuinely have no coupon; the field is blank.
+                    coupon = 0.0
+                    frequency = 0
+                else:
+                    # A coupon-bearing security with no coupon is unusable.
+                    # Leave it None so from_row rejects it with a reason
+                    # rather than silently inventing a 0% bond.
+                    skipped_no_coupon += 1
+                    continue
             if frequency is None:
-                frequency = 0 if sec_type in ('Bill', 'CMB') else 2
+                frequency = 0 if is_discount else 2
 
             # A TIPS coupon is a REAL rate and its principal accretes with
             # CPI. This model has no inflation curve, so it cannot price one.
@@ -315,6 +348,16 @@ class TreasuryDirectClient:
                 'seniority_rank': 1,
                 'seniority_source': 'sovereign',
                 'issuer_cat': 'UST',
+                # Amount outstanding is a real liquidity measure and the only
+                # one a Treasury has before N-PORT marks are attached. Note it
+                # is a TRUE outstanding figure, unlike the corporate side
+                # where fund holdings are only a lower bound on issue size.
+                'amount_outstanding_usd': _parse_amount(
+                    rec.get('currentlyOutstanding')),
                 'reference_source': 'treasury_direct',
             })
+        if skipped_unissued or skipped_no_coupon:
+            log.info('TreasuryDirect: skipped %d not-yet-issued and %d '
+                     'without a coupon (forthcoming auctions)',
+                     skipped_unissued, skipped_no_coupon)
         return out

@@ -9,6 +9,7 @@ structurally inapplicable (`_appl_fixed_coupon`) and says so on the report.
 """
 
 from models.daycount import ACT_360, ACT_ACT, ACT_365F, D30_360
+from models.discount import MONEY_MARKET_MAX_YEARS
 
 COMP_SEMIANNUAL = 'semiannual'
 COMP_SIMPLE = 'simple'
@@ -59,20 +60,36 @@ def classify_by_cusip(cusip):
     return None
 
 
-def conventions_for(asset_class, coupon_rate=None, frequency=None):
+def conventions_for(asset_class, coupon_rate=None, frequency=None,
+                    years_to_maturity=None):
     """Return {frequency, convention, comp} for an asset class.
 
     An explicit `frequency` from the source data wins over the table — issuers
-    do occasionally pay annually or quarterly. A zero coupon forces frequency
-    0 and simple compounding regardless of class, because there is nothing to
-    compound semiannually.
+    do occasionally pay annually or quarterly.
+
+    A ZERO COUPON SPLITS BY TENOR, NOT BY COUPON. The obvious rule — "no
+    coupon means frequency 0 and simple compounding" — is wrong for long
+    zeros. A 10-year STRIP is conventionally quoted on a semiannual
+    bond-equivalent basis, and forcing it to frequency 0 sends it down the
+    single-period discount path where it prices as though it matured in six
+    months. Under a year, money-market simple is right; beyond that,
+    bond-equivalent semiannual is, and a zero-coupon schedule at frequency 2
+    generates the correct number of periods for the ordinary machinery.
     """
     base = dict(CONVENTIONS.get(asset_class or '', DEFAULT_CONVENTION))
     if frequency is not None:
         base['frequency'] = frequency
+
     if coupon_rate is not None and coupon_rate == 0:
-        base['frequency'] = 0
-        base['comp'] = COMP_SIMPLE
+        short = (years_to_maturity is not None
+                 and years_to_maturity <= MONEY_MARKET_MAX_YEARS)
+        # A declared bill is always money-market, whatever its remaining life.
+        if short or asset_class == 'TREASURY_BILL':
+            base['frequency'] = 0
+            base['comp'] = COMP_SIMPLE
+        else:
+            base['frequency'] = base['frequency'] or 2
+            base['comp'] = COMP_SEMIANNUAL
     return base
 
 
