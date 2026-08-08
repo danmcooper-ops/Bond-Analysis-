@@ -17,7 +17,10 @@ each named function, normalises away comments/docstrings/blank lines, and
 reports only functions whose logic actually differs.
 
 Usage:
-    python tools/kernel_diff.py [--equity-root ..] [--verbose]
+    python tools/kernel_diff.py [--equity-root PATH] [--verbose]
+
+The equity checkout is no longer a parent directory of this repo, so its path
+comes from --equity-root, or $EQUITY_ROOT, or the default in the source below.
 """
 
 import argparse
@@ -29,6 +32,15 @@ import sys
 import tokenize
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+
+# This repo used to sit INSIDE the stock-analysis-model working tree, so '..'
+# found the equity checkout. It is now a standalone sibling elsewhere on disk,
+# and the two have no fixed relative path -- so the location has to be stated
+# rather than guessed. $EQUITY_ROOT wins, then the path below, then
+# --equity-root beats both. Nothing here is read unless you run this script.
+EQUITY_ROOT_DEFAULT = os.environ.get(
+    'EQUITY_ROOT',
+    os.path.expanduser('~/Desktop/Workspace Folder'))
 
 # (vendored path, upstream path, functions to compare, expected-divergence notes)
 #
@@ -142,8 +154,9 @@ def _compare(name, mine, theirs, verbose):
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('--equity-root', default='..',
-                    help='path to the stock-analysis-model checkout (default: ..)')
+    ap.add_argument('--equity-root', default=EQUITY_ROOT_DEFAULT,
+                    help=f'path to the stock-analysis-model checkout '
+                         f'(default: $EQUITY_ROOT, else {EQUITY_ROOT_DEFAULT})')
     ap.add_argument('--verbose', action='store_true',
                     help='show full diffs, including for expected divergences')
     args = ap.parse_args()

@@ -62,10 +62,16 @@ class EquitySnapshotBackend:
         they stood when the price was struck.
         """
         self.as_of = as_of
+        # The old default here walked up three directories to find <parent
+        # repo>/output, which worked only because this repo used to live INSIDE
+        # the stock-analysis-model checkout. It is now standalone, so that walk
+        # resolves to a sibling of this repo that does not exist -- and the
+        # failure would be SILENT: `available` returns False, the stale-risk
+        # guard suppresses the divergence signal for every bond, and nothing
+        # raises. Hence an explicit path, overridable by $EQUITY_SNAPSHOT_DIR.
         self.snapshot_dir = snapshot_dir or os.environ.get(
             'EQUITY_SNAPSHOT_DIR',
-            os.path.join(os.path.dirname(os.path.dirname(
-                os.path.dirname(os.path.abspath(__file__)))), 'output'))
+            os.path.expanduser('~/Desktop/Workspace Folder/output'))
         self._rows = None
         self._as_of = None
         self._schema = set()

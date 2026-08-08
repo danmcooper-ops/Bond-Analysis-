@@ -11,6 +11,18 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# This repo's OWN interpreter. This used to default to ../.venv/bin/python --
+# the stock-analysis-model venv -- back when this repo lived inside that
+# checkout. Reaching outside the repo for an interpreter meant a fresh clone
+# had no working script; keep this path local. Override with PYTHON=... .
+PYTHON="${PYTHON:-./.venv/bin/python}"
+if [ ! -x "$PYTHON" ]; then
+  echo "No interpreter at $PYTHON." >&2
+  echo "Create one:  python3 -m venv .venv && ./.venv/bin/pip install -r requirements.txt" >&2
+  echo "Or point at an existing one:  PYTHON=/path/to/python $0" >&2
+  exit 1
+fi
+
 [ -f .env ] || cp .env.example .env
 
 # --edit skips the prompt entirely and opens .env in an editor. The prompt
@@ -73,7 +85,7 @@ fi
 # The key reaches Python through the environment rather than a file or an
 # argument -- an argument shows up in `ps` for the lifetime of the process.
 echo 'Checking the key against FRED...'
-if ! FRED_CANDIDATE_KEY="$key" "${PYTHON:-../.venv/bin/python}" - <<'PY'
+if ! FRED_CANDIDATE_KEY="$key" "$PYTHON" - <<'PY'
 import os, sys
 sys.path.insert(0, os.getcwd())
 from data.fred_client import FREDClient
@@ -118,7 +130,7 @@ echo
 # unquoted value containing a space -- SEC_USER_AGENT=Dan Cooper <addr> tries
 # to run `Cooper` as a command. data.http.load_dotenv parses the file properly,
 # and using it here means this check exercises the same path the pipeline does.
-exec "${PYTHON:-../.venv/bin/python}" - <<'PY'
+exec "$PYTHON" - <<'PY'
 import os, sys
 sys.path.insert(0, os.getcwd())
 from datetime import date, timedelta
