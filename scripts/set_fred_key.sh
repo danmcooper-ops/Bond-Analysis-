@@ -44,17 +44,33 @@ unset key
 echo "Written to .env (mode 600, git-ignored)."
 echo
 
-set -a; . ./.env; set +a
+# Deliberately NOT `set -a; . ./.env`. Sourcing .env as shell breaks on any
+# unquoted value containing a space -- SEC_USER_AGENT=Dan Cooper <addr> tries
+# to run `Cooper` as a command. data.http.load_dotenv parses the file properly,
+# and using it here means this check exercises the same path the pipeline does.
 exec "${PYTHON:-../.venv/bin/python}" - <<'PY'
-from data.fred_client import FredClient
-c = FredClient()
+from data.http import load_dotenv, user_agent
+load_dotenv()
+print('SEC User-Agent:', user_agent())
+
+from datetime import date, timedelta
+
+from data.fred_client import FREDClient
+c = FREDClient()
 if not c.api_key:
     raise SystemExit('[fail] client still sees no key')
-oas = c.fetch_bucket_oas('2026-08-05')
+
+# A date, not a string: _as_of_value compares observation keys against this
+# directly, so a string raises TypeError rather than returning nothing.
+# force=True so this reads FRED rather than a cache written before the key
+# existed -- otherwise a dead key still "passes".
+as_of = date.today() - timedelta(days=3)
+c.fetch_series('BAMLC0A4CBBB', force=True)
+oas = c.fetch_bucket_oas(as_of)
 if not oas:
     raise SystemExit('[fail] key present but FRED returned nothing — '
                      'it may be unactivated or revoked')
-print('Keyed request succeeded. Bucket OAS on 2026-08-05:')
-for bucket, bp in sorted(oas.items()):
-    print(f'  {bucket:5s} {bp:7.1f} bp')
+print(f'Keyed request succeeded. Bucket OAS near {as_of}:')
+for bucket, val in sorted(oas.items()):
+    print(f'  {bucket:5s} {val * 1e4:7.1f} bp')
 PY

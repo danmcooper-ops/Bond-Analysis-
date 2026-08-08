@@ -19,8 +19,50 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 
 import requests
 
-DEFAULT_USER_AGENT = os.environ.get(
-    'SEC_USER_AGENT', 'BondAnalysisModel/1.0 (contact: set SEC_USER_AGENT)')
+FALLBACK_USER_AGENT = 'BondAnalysisModel/1.0 (contact: set SEC_USER_AGENT)'
+
+
+def load_dotenv(path=None):
+    """Minimal .env loader: KEY=VALUE lines, no export, no interpolation.
+
+    Uses setdefault so a real environment variable always wins over the file
+    — which is what you want when a scheduled job supplies secrets directly.
+    """
+    if path is None:
+        path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), '.env')
+    if not os.path.exists(path):
+        return False
+    with open(path, encoding='utf-8') as fh:
+        for line in fh:
+            line = line.strip()
+            if not line or line.startswith('#') or '=' not in line:
+                continue
+            key, _, value = line.partition('=')
+            value = value.strip().strip('"').strip("'")
+            if value:
+                os.environ.setdefault(key.strip(), value)
+    return True
+
+
+# At import, before anything reads the environment. This used to live at the
+# bottom of the module and be called from FredClient.__init__, which was too
+# late: DEFAULT_USER_AGENT had already been frozen to the fallback, so every
+# SEC request went out advertising the literal string "set SEC_USER_AGENT".
+# SEC's fair-access policy throttles exactly that.
+load_dotenv()
+
+
+def user_agent():
+    """Resolved per request, not once at import.
+
+    SEC requires a real contact address on every request. Reading the
+    environment at call time means a .env written after this module was
+    imported still takes effect, which is the normal case for a long-running
+    session or a notebook.
+    """
+    return os.environ.get('SEC_USER_AGENT') or FALLBACK_USER_AGENT
+
 
 # Shared pool for wall-clock deadlines. Module-level and bounded so a run
 # cannot spawn an unbounded number of timeout threads.
@@ -99,7 +141,7 @@ def get(url, *, params=None, headers=None, timeout=30, max_retries=3,
     succeed on a second attempt and retrying only burns the rate limit.
     """
     host = _host_of(url)
-    hdrs = {'User-Agent': DEFAULT_USER_AGENT}
+    hdrs = {'User-Agent': user_agent()}
     if headers:
         hdrs.update(headers)
     caller = session or requests
@@ -158,7 +200,7 @@ def download_atomic(url, dest, *, headers=None, timeout=600, chunk=1 << 20,
     problem. Returns the destination path, or None.
     """
     host = _host_of(url)
-    hdrs = {'User-Agent': DEFAULT_USER_AGENT}
+    hdrs = {'User-Agent': user_agent()}
     if headers:
         hdrs.update(headers)
 
@@ -190,24 +232,3 @@ def download_atomic(url, dest, *, headers=None, timeout=600, chunk=1 << 20,
                 pass
 
 
-def load_dotenv(path=None):
-    """Minimal .env loader: KEY=VALUE lines, no export, no interpolation.
-
-    Uses setdefault so a real environment variable always wins over the file
-    — which is what you want when a scheduled job supplies secrets directly.
-    """
-    if path is None:
-        path = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), '.env')
-    if not os.path.exists(path):
-        return False
-    with open(path, encoding='utf-8') as fh:
-        for line in fh:
-            line = line.strip()
-            if not line or line.startswith('#') or '=' not in line:
-                continue
-            key, _, value = line.partition('=')
-            value = value.strip().strip('"').strip("'")
-            if value:
-                os.environ.setdefault(key.strip(), value)
-    return True
