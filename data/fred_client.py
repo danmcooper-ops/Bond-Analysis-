@@ -6,21 +6,23 @@ no benchmark to call a bond cheap against.
 
 TWO ACCESS PATHS, AND THE DIFFERENCE MATTERS
 --------------------------------------------
-Keyed (api.stlouisfed.org, free key) returns full history — the ICE BofA
-series go back to 1996.
+The ICE BofA credit-spread series are capped at a rolling ~3-year window BY
+FRED ITSELF, keyed or not. Measured 2026-08-08 with a working key: the series
+METADATA reports observation_start 2023-08-08 — exactly three years back — for
+every BAML* series, while DGS10 returns full history to 1962 on the same key.
+That is ICE's licensing, not a key tier: no free key unlocks deeper spreads.
+(This file previously claimed a key restored spread history to 1996. Measured
+keyed on 2026-08-08: it does not.)
 
-Keyless (fredgraph.csv) needs no key and works fine for daily pulls, but
-measured on 2026-08-06 it returns exactly 796 rows starting 2023-08-07 for
-EVERY ICE BofA series, and ignores the cosd start-date parameter entirely.
-That is a rolling ~3-year window on the licensed series; DGS* is unaffected
-and comes back to 1962 keyless.
+What the key does buy: full DGS*/CMT history for the curve backfill, the JSON
+API's explicit start/end parameters, and first-class rate limits. What nothing
+free buys: credit-spread history past three years, so the walk-forward
+calibration trains inside one spread regime and cannot see a full credit
+cycle. Treat calibrated cutpoints as regime-local, not through-the-cycle.
 
-So the key is not a nice-to-have. Without it the walk-forward calibration has
-~3 years of spread history instead of ~30, which is the difference between
-calibrating across two credit cycles and calibrating across none. The client
-records `history_source` and the actual first observation on every fetch so a
-truncated backfill is visible in the run log rather than silently shrinking
-the training window.
+The client records `history_source` and the actual first observation on every
+fetch so a truncated backfill is visible in the run log rather than silently
+shrinking the training window.
 """
 
 import csv
@@ -92,9 +94,9 @@ class FREDClient:
         if not self.api_key:
             log.warning(
                 'No FRED_API_KEY: falling back to the keyless endpoint, which '
-                'caps ICE BofA credit-spread series at a rolling ~3-year '
-                'window. Daily scoring is unaffected; the walk-forward '
-                'calibration will train on a much shorter history.')
+                'uses fredgraph.csv. Daily scoring is unaffected; note the '
+                'ICE BofA spread series are capped at a rolling ~3-year '
+                'window by FRED regardless of key.')
 
     # -- fetching -----------------------------------------------------------
 
