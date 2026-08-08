@@ -38,31 +38,100 @@ log = get_logger('report_html')
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUTPUT_DIR = os.path.join(REPO_ROOT, 'output')
 
-# (field, label, format, width). Format codes are handled in the page's JS.
+# (field, label, format, width, tooltip). The tooltip is the point of the
+# column list as much as the label is: half of these are jargon, and a number
+# whose caveat is not attached to it will be read without the caveat.
 COLUMNS = [
-    ('cusip', 'CUSIP', 'text', 90),
-    ('issuer_name', 'Issuer', 'text', 210),
-    ('asset_class', 'Class', 'cls', 78),
-    ('maturity_date', 'Maturity', 'date', 92),
-    ('years_to_maturity', 'Yrs', 'n1', 52),
-    ('coupon_rate', 'Coupon', 'pct2', 68),
-    ('clean_price_est', 'Price', 'n2', 68),
-    ('ytw', 'YTW', 'pct2', 68),
-    ('modified_duration', 'Dur', 'n2', 58),
-    ('convexity', 'Cvx', 'n0', 56),
-    ('z_spread', 'Z-spd', 'bp', 66),
-    ('fair_spread', 'Fair', 'bp', 62),
-    ('spread_mispricing', 'Mispr', 'bp', 66),
-    ('implied_bucket', 'Model', 'bucket', 62),
-    ('market_bucket', 'Market', 'bucket', 64),
-    ('bucket_divergence_notches', 'Div', 'n0', 48),
-    ('issuer_credit_score', 'Score', 'n0', 58),
-    ('n_funds', 'Funds', 'int', 56),
-    ('total_held_usd', 'Held', 'usd', 74),
-    ('mark_age_days', 'Mark', 'days', 58),
-    ('_composite_score', 'Comp', 'n1', 60),
-    ('rating', 'Rating', 'rating', 88),
-    ('_caps', 'Caps', 'caps', 200),
+    ('cusip', 'CUSIP', 'text', 90,
+     "The security's nine-character identifier. Bonds are identified per ISSUE, "
+     "not per issuer — one company often has dozens outstanding, each with its "
+     "own coupon, maturity and price."),
+    ('issuer_name', 'Issuer', 'text', 210,
+     "The issuer as reported by funds in their N-PORT filings. Spellings vary "
+     "widely between funds; the crosswalk resolves them to one company where it "
+     "can, and roughly half the universe it cannot."),
+    ('asset_class', 'Class', 'cls', 78,
+     "TSY = US Treasury note or bond, T-BILL = Treasury bill, IG / HY = "
+     "corporate investment grade or high yield. IG vs HY is assigned by this "
+     "model's own credit score, NOT by a rating agency."),
+    ('maturity_date', 'Maturity', 'date', 92,
+     "Final maturity. Call schedules are not available in free data, so a "
+     "callable bond may be repaid years earlier than this date suggests."),
+    ('years_to_maturity', 'Yrs', 'n1', 52,
+     "Years from today to final maturity."),
+    ('coupon_rate', 'Coupon', 'pct2', 68,
+     "Annual coupon rate, paid semiannually for almost everything here. Zero "
+     "for Treasury bills, which are sold at a discount instead."),
+    ('clean_price_est', 'Price', 'n2', 68,
+     "Estimated clean price per 100 face — the last fund mark aged onto today's "
+     "curve via the spread it implied. NOT a live quote: the underlying mark is "
+     "typically about 98 days old."),
+    ('ytw', 'YTW', 'pct2', 68,
+     "Yield to worst: the lower of yield-to-maturity and yield-to-call. With no "
+     "call schedules in free data this equals yield-to-maturity, so for a "
+     "callable bond it OVERSTATES what you are likely to receive."),
+    ('modified_duration', 'Dur', 'n2', 58,
+     "Modified duration: roughly the percentage the price falls if yields rise "
+     "by one percentage point. A duration of 7 means a 1% yield rise costs "
+     "about 7% of the price."),
+    ('convexity', 'Cvx', 'n0', 56,
+     "Convexity: how duration itself changes as yields move. Higher is better — "
+     "the bond gains more in a rally than it loses in an equal selloff."),
+    ('z_spread', 'Z-spd', 'bp', 66,
+     "Z-spread in basis points: the constant spread over the entire Treasury "
+     "zero curve that reprices this bond. This is what you are paid for taking "
+     "credit risk instead of lending to the government."),
+    ('fair_spread', 'Fair', 'bp', 62,
+     "What the model thinks the spread should be, given the issuer's credit "
+     "bucket and this bond's maturity. Anchored on what OTHER bonds in the same "
+     "bucket actually trade at, so roughly half of each bucket is cheap by "
+     "construction."),
+    ('spread_mispricing', 'Mispr', 'bp', 66,
+     "Observed spread minus fair spread. POSITIVE MEANS CHEAP — you are paid "
+     "more than the model thinks the risk deserves. This is the model's main "
+     "valuation signal, and the one the backtest supports: the cheapest fifth "
+     "beat the richest by about 27bp per month."),
+    ('implied_bucket', 'Model', 'bucket', 62,
+     "The credit bucket implied by the issuer's financials — a six-factor "
+     "scorecard, NOT an agency rating. It does not predict forward spread "
+     "changes in testing, so read it as a description of the issuer, not a "
+     "forecast."),
+    ('market_bucket', 'Market', 'bucket', 64,
+     "The credit bucket implied by the bond's OWN spread — where the market is "
+     "actually pricing this credit today."),
+    ('bucket_divergence_notches', 'Div', 'n0', 48,
+     "Divergence in notches: Market minus Model. Positive means the market "
+     "prices the credit WORSE than the financials suggest (a possible rising "
+     "star); negative means better (possible fallen-angel risk)."),
+    ('issuer_credit_score', 'Score', 'n0', 58,
+     "Issuer credit score, 0-100. Weighted from market capitalisation, market "
+     "leverage, interest coverage, Altman-Z, cash generation and book leverage "
+     "— weights MEASURED against observed spreads rather than chosen."),
+    ('n_funds', 'Funds', 'int', 56,
+     "How many registered funds hold this bond. The price is the median across "
+     "them with outliers rejected, so more funds means a more reliable mark. "
+     "Below three, the row is capped."),
+    ('total_held_usd', 'Held', 'usd', 74,
+     "Total value held across all reporting funds. This is a LOWER BOUND on the "
+     "issue size, never the issue size itself — it only counts funds that file "
+     "N-PORT."),
+    ('mark_age_days', 'Mark', 'days', 58,
+     "Age of the underlying fund mark in days. N-PORT publishes monthly with "
+     "roughly a 60-day lag, so about 98 days is normal rather than stale. Past "
+     "100 days the row is capped."),
+    ('_composite_score', 'Comp', 'n1', 60,
+     "Composite score, 0-100, weighted across Valuation, Credit, Rates, "
+     "Structure and Liquidity. A category that cannot describe an instrument — "
+     "credit metrics for a Treasury — drops out entirely and the rest "
+     "renormalise, rather than scoring zero."),
+    ('rating', 'Rating', 'rating', 88,
+     "BUY / LEAN BUY / HOLD / PASS, from the composite against thresholds "
+     "calibrated separately per asset class. Caps can only LOWER a rating, "
+     "never raise it, so a capped BUY shows as HOLD or PASS."),
+    ('_caps', 'Caps', 'caps', 200,
+     "Why this row's rating was capped. A cap does not say the bond is bad — it "
+     "says the data does not support acting on it. Most often the issuer could "
+     "not be identified, so no credit view is possible."),
 ]
 
 CATEGORY_SCORES = [('_score_valuation', 'Valuation'), ('_score_credit', 'Credit'),
@@ -145,7 +214,8 @@ def build_payload(rows):
     concentration = Counter(r.get('peer_group', '?') for r in buy)
 
     return {
-        'columns': [{'k': f, 'l': l, 'f': fmt, 'w': w} for f, l, fmt, w in COLUMNS],
+        'columns': [{'k': f, 'l': l, 'f': fmt, 'w': w, 't': tip}
+                    for f, l, fmt, w, tip in COLUMNS],
         'rows': table,
         'ratings': dict(ratings),
         'classes': dict(classes),
@@ -347,6 +417,28 @@ footer {{ color:var(--muted); font-size:12px; margin-top:26px;
   border-top:1px solid var(--line); padding-top:14px; }}
 code {{ background:color-mix(in srgb,var(--muted) 14%,transparent);
   padding:1px 5px; border-radius:4px; font-size:12px; }}
+/* Tooltips float on <body>, not as a ::after on the trigger: the table lives
+   in an overflow:auto container that would clip a pseudo-element, and the
+   header row is sticky, which creates its own stacking context. */
+/* width:max-content sizes the box to its TEXT. Without it the box sizes to its
+   containing block, which for an absolutely-positioned child of <body> is the
+   initial containing block — and any renderer reporting that as narrow (or 0)
+   wraps a two-line tooltip into a 90px-wide, 400px-tall ribbon. */
+#tip {{ position:absolute; z-index:99; width:max-content; max-width:330px;
+  padding:9px 11px;
+  background:var(--panel); color:var(--ink); border:1px solid var(--line);
+  border-radius:8px; box-shadow:0 6px 24px rgba(0,0,0,.16);
+  font-size:12.5px; line-height:1.45; pointer-events:none; opacity:0;
+  transition:opacity .12s; font-weight:400; text-transform:none;
+  letter-spacing:normal; text-align:left; }}
+#tip.on {{ opacity:1; }}
+[data-tip] {{ cursor:help; }}
+th[data-tip] {{ text-decoration:underline dotted
+  color-mix(in srgb,var(--muted) 60%,transparent); text-underline-offset:3px; }}
+.card[data-tip] .k::after {{ content:" \24D8"; opacity:.55; }}
+.dist span[data-tip] {{ text-decoration:underline dotted
+  color-mix(in srgb,var(--muted) 55%,transparent); text-underline-offset:2px; }}
+h2[data-tip]::after {{ content:" \24D8"; opacity:.4; font-size:12px; }}
 </style></head><body><div class="wrap">
 
 <h1>Bond Analysis</h1>
@@ -374,14 +466,14 @@ OAS, so callable bonds priced above par are systematically overstated and are ca
 </div>
 
 <div class="grid">
-  <div class="panel"><h2>Rating distribution</h2><div class="dist">{rating_dist}</div></div>
-  <div class="panel"><h2>Implied credit bucket</h2><div class="dist">{bucket_dist}</div></div>
-  <div class="panel"><h2>Treasury par curve</h2>{curve_svg}</div>
-  <div class="panel"><h2>Spread term structure, fitted vs FRED</h2>{term_svg}
+  <div class="panel"><h2 data-tip="Thresholds are calibrated per asset class against each class own score distribution, so BUY means roughly the top 3% of that class rather than an absolute standard.">Rating distribution</h2><div class="dist">{rating_dist}</div></div>
+  <div class="panel"><h2 data-tip="The model own credit view, from a six-factor scorecard. Cutpoints are matched to the mix the bond market itself prices, so the shape here should resemble the real corporate universe.">Implied credit bucket</h2><div class="dist">{bucket_dist}</div></div>
+  <div class="panel"><h2 data-tip="Today par yield curve from home.treasury.gov, bootstrapped to zero rates and used to discount every cashflow in the model.">Treasury par curve</h2>{curve_svg}</div>
+  <div class="panel"><h2 data-tip="How much wider a spread should be at each maturity, as a multiple of the five-year level. Fitted from about 130,000 observed spreads; FRED published slices stop at 15 years and overstate the long end by up to 17%.">Spread term structure, fitted vs FRED</h2>{term_svg}
     <p class="muted" style="font-size:12px;margin:8px 0 0">Fitted from ~130,000 observed
     spreads. Wide credits <em>invert</em> — distressed risk sits in near-dated paper.</p></div>
-  <div class="panel"><h2>Why rows are capped</h2>{cap_svg}</div>
-  <div class="panel"><h2>Mean score by category</h2>{cat_svg}
+  <div class="panel"><h2 data-tip="Caps lower a rating when the evidence does not support acting on it. The dominant reason is an unidentified issuer, which is a coverage limit rather than a judgement on the bond.">Why rows are capped</h2>{cap_svg}</div>
+  <div class="panel"><h2 data-tip="Average score in each of the five categories, over the rows where that category applied at all. A category that cannot describe an instrument drops out of its composite entirely rather than scoring zero.">Mean score by category</h2>{cat_svg}
     <p class="muted" style="font-size:12px;margin:8px 0 0">A category absent from a row
     was structurally inapplicable — a Treasury has no issuer balance sheet — and drops
     out of that row's composite rather than scoring zero.</p></div>
@@ -412,6 +504,7 @@ Sources: SEC Form N-PORT, US Treasury, FRED, TreasuryDirect, SEC XBRL. Free data
 <strong>Not investment advice.</strong> The credit signal is unvalidated; see the caveats above.
 </footer>
 </div>
+<div id="tip" role="tooltip"></div>
 <script id="payload" type="application/json">{payload}</script>
 <script>
 const D = JSON.parse(document.getElementById('payload').textContent);
@@ -420,6 +513,8 @@ const idx = {{}}; COLS.forEach((c,i)=>idx[c.k]=i);
 let sortCol = idx['_composite_score'], sortAsc = false;
 
 const bp = v => v==null ? '' : (v*10000).toFixed(0);
+const esc = t => String(t==null?'':t).replace(/&/g,'&amp;').replace(/"/g,'&quot;')
+  .replace(/</g,'&lt;').replace(/>/g,'&gt;');
 function fmt(v, f) {{
   if (v==null || v==='') return '<span class="muted">—</span>';
   switch(f) {{
@@ -448,7 +543,8 @@ function head() {{
   document.getElementById('head').innerHTML = COLS.map((c,i)=>{{
     const left = ['text','cls','rating','caps','bucket','date'].includes(c.f);
     const cls = (left?'l ':'') + (i===sortCol ? 'sorted'+(sortAsc?' asc':'') : '');
-    return '<th class="'+cls+'" data-i="'+i+'" style="min-width:'+c.w+'px">'+c.l+'</th>';
+    return '<th class="'+cls+'" data-i="'+i+'" data-tip="'+esc(c.t)+'" '+
+      'style="min-width:'+c.w+'px">'+c.l+'</th>';
   }}).join('');
   document.querySelectorAll('#head th').forEach(th=>th.onclick=()=>{{
     const i=+th.dataset.i; sortAsc = (i===sortCol) ? !sortAsc : false; sortCol=i;
@@ -488,7 +584,12 @@ function draw() {{
   document.getElementById('body').innerHTML = shown.map(row=>'<tr>'+
     COLS.map((c,i)=>{{
       const left = ['text','cls','rating','caps','bucket','date'].includes(c.f);
-      return '<td'+(left?' class="l"':'')+'>'+fmt(row[i],c.f)+'</td>';
+      // Long values are visually truncated by the column width, so carry the
+      // full text natively — a hover tooltip the user cannot trigger by
+      // keyboard is not a substitute for the value being readable.
+      const long = (c.f==='caps'||c.f==='text') && row[i];
+      const t = long ? ' title="'+esc(String(row[i]))+'"' : '';
+      return '<td'+(left?' class="l"':'')+t+'>'+fmt(row[i],c.f)+'</td>';
     }}).join('')+'</tr>').join('');
 }}
 
@@ -501,7 +602,73 @@ document.getElementById('reset').onclick=()=>{{
   document.getElementById('fUncapped').checked=false; draw();
 }};
 head(); draw();
+
+// --- tooltips --------------------------------------------------------------
+// One floating element, positioned on hover or keyboard focus. Delegated from
+// document so it covers rows drawn after load without rebinding.
+const TIP = document.getElementById('tip');
+function showTip(el) {{
+  const text = el.getAttribute('data-tip');
+  if (!text) return;
+  TIP.textContent = text;
+  // Park it at a known origin BEFORE measuring. Measuring while `left` is
+  // still `auto` lays the box out at its static position, where the wrap — and
+  // therefore the height — can differ from where it will actually sit.
+  TIP.style.left = '0px';
+  TIP.style.top = '0px';
+  TIP.classList.add('on');
+
+  const r = el.getBoundingClientRect();
+  const t = TIP.getBoundingClientRect();
+  // clientWidth reports 0 in some embedded/snapshot renderers; falling through
+  // to it unguarded drives maxLeft negative and pins every tooltip to the left
+  // edge of the page.
+  const vw = document.documentElement.clientWidth || window.innerWidth || 1024;
+  const vh = window.innerHeight || document.documentElement.clientHeight || 768;
+
+  // Prefer below; flip above when that would run off the bottom of the window.
+  let top = r.bottom + window.scrollY + 8;
+  if (r.bottom + t.height + 16 > vh && r.top > t.height + 16)
+    top = r.top + window.scrollY - t.height - 8;
+
+  let left = r.left + window.scrollX;
+  const minLeft = window.scrollX + 8;
+  const maxLeft = Math.max(minLeft, window.scrollX + vw - t.width - 10);
+  TIP.style.top = top + 'px';
+  TIP.style.left = Math.max(minLeft, Math.min(left, maxLeft)) + 'px';
+}}
+function hideTip() {{ TIP.classList.remove('on'); }}
+document.addEventListener('mouseover', e => {{
+  const el = e.target.closest('[data-tip]');
+  if (el) showTip(el); else if (!TIP.contains(e.target)) hideTip();
+}});
+document.addEventListener('focusin', e => {{
+  const el = e.target.closest('[data-tip]');
+  if (el) showTip(el);
+}});
+document.addEventListener('focusout', hideTip);
+document.addEventListener('scroll', hideTip, true);
+document.addEventListener('keydown', e => {{ if (e.key === 'Escape') hideTip(); }});
 </script></body></html>"""
+
+
+BUCKET_TIPS = {
+    'AAA': 'Model-implied, not an agency rating. This bucket holds the '
+           'strongest issuers by the six-factor scorecard — and the model is '
+           'more generous than an agency would be, so read it as "top decile '
+           'of this universe" rather than as a AAA.',
+    'AA': 'Model-implied. Very strong issuers, one notch below the top band.',
+    'A': 'Model-implied. Solid investment grade.',
+    'BBB': 'Model-implied. The lowest investment-grade band, and the largest '
+           'part of the real corporate bond market.',
+    'BB': 'Model-implied. The top of high yield — often fallen angels or '
+          'leveraged but stable issuers.',
+    'B': 'Model-implied. Genuine high yield, where default risk is a real part '
+         'of the return.',
+    'CCC': 'Model-implied. Distressed. Very few bonds land here because the '
+           'cutpoints are matched to the market\'s own mix, and the market '
+           'prices almost nothing this wide.',
+}
 
 
 def _dist_rows(counts, order=None, total=None):
@@ -516,8 +683,10 @@ def _dist_rows(counts, order=None, total=None):
     for label, value in items:
         width = 100.0 * value / top
         pct = 100.0 * value / total if total else 0
+        tip = BUCKET_TIPS.get(label)
+        attr = f' data-tip="{tip}"' if tip else ''
         out.append(
-            f'<span>{label}</span>'
+            f'<span{attr}>{label}</span>'
             f'<span><span class="bar" style="width:{width:.1f}%;display:block"></span></span>'
             f'<span class="muted">{value:,} &middot; {pct:.1f}%</span>')
     return ''.join(out)
@@ -533,17 +702,40 @@ def render(rows, meta, term, path):
                  if r.get('mark_age_days') is not None]
     mark_age = int(sorted(mark_ages)[len(mark_ages) // 2]) if mark_ages else 0
 
+    card_specs = [
+        ('Instruments', f'{total:,}',
+         'Every US Treasury and corporate bond the model could price: held by '
+         'at least two reporting funds, at least $10m in aggregate, and more '
+         'than six months from maturity.'),
+        ('BUY', f'{ratings.get("BUY", 0):,}',
+         'Top of the composite ranking within its asset class, and not capped. '
+         'Thresholds are quantile-matched per class, so this is deliberately a '
+         'short list rather than everything that looks cheap.'),
+        ('LEAN BUY', f'{ratings.get("LEAN BUY", 0):,}',
+         'Ranks well but with less margin than a BUY, or carries a mild '
+         'reservation.'),
+        ('HOLD', f'{ratings.get("HOLD", 0):,}',
+         'The middle of the distribution, plus everything demoted here by a '
+         'cap. Most capped rows land in HOLD.'),
+        ('PASS', f'{ratings.get("PASS", 0):,}',
+         'Bottom of the ranking, or trading far through what the model thinks '
+         'fair, or flagged for default, arrears or PIK.'),
+        ('Capped', f'{capped_pct}%',
+         'Share of rows whose rating was lowered because the data does not '
+         'support acting on them — overwhelmingly because the issuer could not '
+         'be identified. A capped row still shows its uncapped rating '
+         'underneath in the data; the cap is a statement about our evidence, '
+         'not about the bond.'),
+        ('Median mark age', f'{mark_age}d',
+         'How old the underlying fund price is. N-PORT publishes monthly with '
+         'about a 60-day lag, so roughly three months is the normal state of '
+         'this model, not a failure. Every price here is that mark aged onto '
+         "today's curve."),
+    ]
     cards = ''.join(
-        f'<div class="card"><div class="v">{v}</div><div class="k">{k}</div></div>'
-        for k, v in [
-            ('Instruments', f'{total:,}'),
-            ('BUY', f'{ratings.get("BUY", 0):,}'),
-            ('LEAN BUY', f'{ratings.get("LEAN BUY", 0):,}'),
-            ('HOLD', f'{ratings.get("HOLD", 0):,}'),
-            ('PASS', f'{ratings.get("PASS", 0):,}'),
-            ('Capped', f'{capped_pct}%'),
-            ('Median mark age', f'{mark_age}d'),
-        ])
+        f'<div class="card" data-tip="{tip.replace(chr(34), chr(39))}">'
+        f'<div class="v">{v}</div><div class="k">{k}</div></div>'
+        for k, v, tip in card_specs)
 
     classes = payload['classes']
     class_opts = ''.join(f'<option value="{c}">{c}</option>'
