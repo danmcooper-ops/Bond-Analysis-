@@ -642,6 +642,14 @@ document.addEventListener('mouseover', e => {{
   const el = e.target.closest('[data-tip]');
   if (el) showTip(el); else if (!TIP.contains(e.target)) hideTip();
 }});
+// mouseover alone is not enough to hide: it only fires when some OTHER element
+// receives the cursor, so leaving the window entirely leaves the tooltip
+// pinned open over the page.
+document.addEventListener('mouseout', e => {{
+  const el = e.target.closest('[data-tip]');
+  // mouseout also fires moving between an element and its own children.
+  if (el && !el.contains(e.relatedTarget)) hideTip();
+}});
 document.addEventListener('focusin', e => {{
   const el = e.target.closest('[data-tip]');
   if (el) showTip(el);
