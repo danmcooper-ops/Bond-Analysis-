@@ -19,6 +19,10 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 
 import requests
 
+from data.logging_setup import get_logger
+
+log = get_logger('http')
+
 FALLBACK_USER_AGENT = 'BondAnalysisModel/1.0 (contact: set SEC_USER_AGENT)'
 
 
@@ -90,13 +94,16 @@ class RateLimiter:
             self._intervals[host] = seconds
 
     def wait(self, host):
+        # Reserve this host's next slot under the lock, then sleep outside it.
+        # Sleeping while holding the lock made one host's wait block requests
+        # to every other host.
         with self._lock:
             interval = self._intervals.get(host, self._default)
-            elapsed = time.time() - self._last.get(host, 0.0)
-            sleep_for = interval - elapsed
-            if sleep_for > 0:
-                time.sleep(sleep_for)
-            self._last[host] = time.time()
+            now = time.time()
+            slot = max(now, self._last.get(host, 0.0) + interval)
+            self._last[host] = slot
+        if slot > now:
+            time.sleep(slot - now)
 
 
 _LIMITER = RateLimiter()
@@ -127,8 +134,10 @@ def run_with_timeout(fn, seconds):
         return future.result(timeout=seconds)
     except FutureTimeout:
         future.cancel()
+        log.warning('Timed out after %ss', seconds)
         return None
-    except Exception:
+    except Exception as exc:
+        log.warning('Call failed: %s: %s', type(exc).__name__, exc)
         return None
 
 

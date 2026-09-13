@@ -382,3 +382,56 @@ def test_normalised_rows_feed_straight_into_bond_construction():
     assert reason is None
     assert bond.convention == 'ACT/ACT'      # Treasury conventions applied
     assert bond.coupon_rate == pytest.approx(0.0425)
+
+
+# --- logging and rate limiting --------------------------------------------
+
+def test_test_suite_never_writes_the_production_run_log():
+    import os
+
+    from data import logging_setup
+    handler = logging_setup._FILE_HANDLER
+    assert handler is not None
+    assert os.path.dirname(handler.baseFilename) == os.environ['BOND_LOG_DIR']
+    assert os.path.realpath(os.path.dirname(handler.baseFilename)) != \
+        os.path.realpath(logging_setup._DEFAULT_LOG_DIR)
+
+
+def test_configure_repoints_the_log_file_at_the_run_date(tmp_path):
+    import os
+
+    from data import logging_setup
+    original = logging_setup._FILE_HANDLER.baseFilename
+    try:
+        logging_setup.configure(log_dir=str(tmp_path), run_date=date(2026, 9, 4))
+        assert logging_setup._FILE_HANDLER.baseFilename == \
+            os.path.join(str(tmp_path), 'run_2026-09-04.log')
+    finally:
+        logging_setup.configure(log_dir=os.path.dirname(original))
+
+
+def test_rate_limiter_does_not_block_other_hosts_while_sleeping():
+    import threading
+    import time
+
+    from data.http import RateLimiter
+    limiter = RateLimiter(default_interval=0.0)
+    limiter.set_interval('slow', 0.5)
+    limiter.wait('slow')                       # first call: no wait
+
+    t = threading.Thread(target=limiter.wait, args=('slow',))
+    t.start()
+    time.sleep(0.05)                           # slow host is now sleeping
+    start = time.time()
+    limiter.wait('fast')
+    elapsed = time.time() - start
+    t.join()
+    assert elapsed < 0.1
+
+
+def test_run_with_timeout_returns_none_on_exception():
+    from data.http import run_with_timeout
+
+    def boom():
+        raise RuntimeError('nope')
+    assert run_with_timeout(boom, 1.0) is None

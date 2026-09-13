@@ -2,9 +2,15 @@
 
 import os
 import sys
+import tempfile
 from datetime import date
 
 import pytest
+
+# Before any test module imports data.*: logging configures itself at import
+# time, and without this the suite appends to output/logs/run_<today>.log —
+# the production run log.
+os.environ['BOND_LOG_DIR'] = tempfile.mkdtemp(prefix='bond-test-logs-')
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
