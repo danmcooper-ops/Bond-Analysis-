@@ -681,3 +681,43 @@ def test_unsolved_spread_and_ambiguous_coupon_are_capped():
     cap, reasons = rating_cap_for_row({'_coupon_unit_ambiguous': True})
     assert cap == 'HOLD' and any('coupon units ambiguous' in r for r in reasons)
     assert _analyzability_score({'_coupon_unit_ambiguous': True}) == 80.0
+
+
+# --- vintage fields for issuers with no fundamentals -------------------------
+
+def test_unmatched_issuers_inherit_the_run_vintage_for_field_gates():
+    from scripts.gates import _appl_fcf_to_debt, _appl_maturity_wall, prepare_scoring_fields
+    vintage = ('altman_z', 'fcf', 'int_cov', 'mcap', 'nd_ebitda', 'sector')
+    matched = {'asset_class': 'CORP_IG', 'issuer_cik': 'ACME',
+               '_fundamentals_asof': '2026-04-30', '_issuer_fields': vintage}
+    unmatched = {'asset_class': 'CORP_IG'}
+    prepare_scoring_fields([matched, unmatched])
+    # Neither field exists in the vintage: masked for BOTH, not zero for one.
+    for appl in (_appl_fcf_to_debt, _appl_maturity_wall):
+        assert appl(matched) is False
+        assert appl(unmatched) is False
+
+
+def test_unmatched_issuers_still_score_zero_on_fields_the_vintage_has():
+    from scripts.gates import _appl_corp_nonfin, _appl_issuer_field, prepare_scoring_fields
+    matched = {'asset_class': 'CORP_IG', '_issuer_fields': ('int_cov',)}
+    unmatched = {'asset_class': 'CORP_IG'}
+    prepare_scoring_fields([matched, unmatched])
+    assert _appl_corp_nonfin(unmatched) and _appl_issuer_field(unmatched, 'int_cov')
+
+
+def test_without_any_vintage_the_gates_still_apply():
+    from scripts.gates import _appl_issuer_field, prepare_scoring_fields
+    row = {'asset_class': 'CORP_IG'}
+    prepare_scoring_fields([row])
+    assert _appl_issuer_field(row, 'fcf', 'total_debt')
+
+
+def test_rescoring_is_idempotent_for_run_fields():
+    from scripts.gates import prepare_scoring_fields
+    rows = [{'asset_class': 'CORP_IG', '_issuer_fields': ('fcf',)},
+            {'asset_class': 'CORP_IG'}]
+    prepare_scoring_fields(rows)
+    first = rows[1]['_run_issuer_fields']
+    prepare_scoring_fields(rows)
+    assert rows[1]['_run_issuer_fields'] == first == ('fcf',)

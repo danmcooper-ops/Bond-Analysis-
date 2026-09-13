@@ -146,6 +146,14 @@ def _appl_issuer_field(row, *fields):
     the whole Credit category down while discriminating between nobody.
     """
     available = row.get('_issuer_fields')
+    if available is None or len(available) == 0:
+        # No fundamentals attached to THIS row (issuer unidentified). Its
+        # vintage is still the run's: a field no snapshot in the run carries
+        # is unmeasurable for an unmatched issuer too. Falling through to
+        # "assume present" scored FCF-to-Debt and Maturity Wall zero for the
+        # ~5,650 unmatched bonds only, while masking them for every matched
+        # one — a pure penalty that discriminated between nobody.
+        available = row.get('_run_issuer_fields')
     if available is None:
         return True          # unknown vintage: assume present, score normally
     # A tuple written to parquet comes back as a numpy array, where truthiness
@@ -500,7 +508,21 @@ def prepare_scoring_fields(results):
     so it must recompute from primitives rather than trusting a stored derived
     value that may predate a change to this function.
     """
+    # The union of fields any attached fundamentals vintage carries in this
+    # run, for rows with no fundamentals of their own. Recomputed from the
+    # per-row primitive every pass, so rescoring a snapshot stays idempotent.
+    run_fields = set()
     for r in results:
+        fields = r.get('_issuer_fields')
+        if fields is not None:
+            try:
+                run_fields.update(fields)
+            except TypeError:
+                pass
+    run_fields = tuple(sorted(run_fields)) if run_fields else None
+
+    for r in results:
+        r['_run_issuer_fields'] = run_fields
         r['peer_group'] = peer_group(r)
         r['payment_status_score'] = _payment_status_score(r)
         r['analyzability_score'] = _analyzability_score(r)
