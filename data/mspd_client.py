@@ -32,6 +32,10 @@ NON_SECURITY_CLASSES = {'Total Marketable', 'Federal Financing Bank'}
 
 MILLIONS = 1e6
 
+# Bump whenever amounts_from_records changes what it derives.
+# 2: outstanding row wins over tranche rows (was: last row wins).
+CACHE_VERSION = 2
+
 
 def amounts_from_records(records):
     """({cusip: dollars}, {source: count}) from MSPD table-3 records.
@@ -112,9 +116,14 @@ class MSPDClient:
         import json
         try:
             with open(path, encoding='utf-8') as fh:
-                return json.load(fh)
+                payload = json.load(fh)
         except (OSError, ValueError):
             return None
+        # The cache holds DERIVED amounts, so a fix to the derivation must
+        # invalidate it; otherwise the old numbers persist for the full TTL.
+        if payload.get('version') != CACHE_VERSION:
+            return None
+        return payload
 
     def _save_cache(self, payload):
         import json
@@ -164,8 +173,8 @@ class MSPDClient:
 
         amounts, sources = amounts_from_records(payload['data'])
 
-        payload_out = {'record_date': record_date, 'amounts': amounts,
-                       'sources': sources}
+        payload_out = {'version': CACHE_VERSION, 'record_date': record_date,
+                       'amounts': amounts, 'sources': sources}
         self._memo = payload_out
         self._save_cache(payload_out)
         log.info('MSPD %s: %d CUSIPs (%s)', record_date, len(amounts),

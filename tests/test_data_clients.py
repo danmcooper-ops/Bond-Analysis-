@@ -537,3 +537,18 @@ def test_treasury_direct_failures_are_recorded(tmp_path, monkeypatch):
     monkeypatch.setattr(tdc, 'get_json', lambda *a, **k: None)
     client.fetch_outstanding(as_of=date(2026, 9, 14), max_years=0)
     assert client.failed_ranges == [(date(2026, 1, 1), date(2026, 12, 31))]
+
+
+def test_mspd_cache_from_before_the_tranche_fix_is_ignored(tmp_path):
+    import json
+
+    from data.mspd_client import CACHE_VERSION, MSPDClient
+    client = MSPDClient(cache_dir=str(tmp_path))
+    path = client._cache_path()
+    with open(path, 'w') as fh:
+        json.dump({'record_date': '2026-08-31', 'amounts': {'X': 1.0}}, fh)
+    assert client._load_cache() is None
+    with open(path, 'w') as fh:
+        json.dump({'version': CACHE_VERSION, 'record_date': '2026-08-31',
+                   'amounts': {'X': 1.0}}, fh)
+    assert client._load_cache()['amounts'] == {'X': 1.0}
