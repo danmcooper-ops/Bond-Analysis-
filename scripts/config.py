@@ -60,7 +60,15 @@ PRICE_SANITY_MAX = 200.0
 # ---------------------------------------------------------------------------
 # Data-quality gates on the N-PORT mark
 # ---------------------------------------------------------------------------
-STALE_MARK_DAYS = 100          # older than this -> HOLD cap
+# Staleness is judged against the DATA VINTAGE, not the wall clock. N-PORT
+# publishes quarterly with a ~60-day lag, so the newest mark in the freshest
+# available dataset is already ~100 days old on release day and ~190 days old
+# just before the next one. A wall-clock cap at 100 days therefore capped every
+# row in the universe (8,909 of 8,968 on 2026-09-09). What the cap should catch
+# is a bond whose OWN mark lags the rest of the dataset — no fund has priced it
+# since — plus a hard backstop for when the whole dataset has gone stale.
+STALE_MARK_LAG_DAYS = 35       # mark older than the dataset's newest -> HOLD
+HARD_STALE_MARK_DAYS = 200     # any mark older than this -> HOLD
 MIN_FUNDS_FOR_BUY = 3          # thinner fund coverage -> HOLD cap
 MAX_PRICE_DISPERSION = 0.02    # cross-fund MAD/median above this -> HOLD cap
 MIN_CUSIP_MATCH_CONFIDENCE = 0.80

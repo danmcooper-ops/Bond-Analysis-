@@ -25,7 +25,7 @@ from scripts.config import (
     RATING_THRESHOLD_BUY, RATING_THRESHOLD_LEAN, RATING_THRESHOLD_PASS,
     CREDIT_CUT_AAA, CREDIT_CUT_AA, CREDIT_CUT_A, CREDIT_CUT_BBB,
     CREDIT_CUT_BB, CREDIT_CUT_B,
-    STALE_MARK_DAYS, MIN_FUNDS_FOR_BUY, MAX_PRICE_DISPERSION,
+    STALE_MARK_LAG_DAYS, HARD_STALE_MARK_DAYS, MIN_FUNDS_FOR_BUY, MAX_PRICE_DISPERSION,
     MIN_CUSIP_MATCH_CONFIDENCE, MAX_FUNDAMENTALS_AGE_DAYS,
     MIN_FUNDS_HOLDING, MIN_TOTAL_HELD_USD, MIN_YEARS_TO_MATURITY,
     CONSENSUS_MAD_K,
@@ -72,7 +72,8 @@ def default_params():
         'fair_spread_term_beta': 1.0,
 
         # Data-quality caps
-        'stale_mark_days': STALE_MARK_DAYS,
+        'stale_mark_lag_days': STALE_MARK_LAG_DAYS,
+        'hard_stale_mark_days': HARD_STALE_MARK_DAYS,
         'min_funds_for_buy': MIN_FUNDS_FOR_BUY,
         'max_price_dispersion': MAX_PRICE_DISPERSION,
         'min_cusip_match_confidence': MIN_CUSIP_MATCH_CONFIDENCE,
@@ -179,8 +180,8 @@ def validate_params(params):
     if not (0.0 < disp <= 1.0):
         errors.append(f"max_price_dispersion {disp} outside (0.0, 1.0]")
 
-    stale = params.get('stale_mark_days', 0)
-    if stale <= 0:
-        errors.append(f"stale_mark_days = {stale} must be positive")
+    for key in ('stale_mark_lag_days', 'hard_stale_mark_days'):
+        if params.get(key, 0) <= 0:
+            errors.append(f"{key} = {params.get(key, 0)} must be positive")
 
     return errors

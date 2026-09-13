@@ -65,7 +65,7 @@ COLUMNS = [
     ('clean_price_est', 'Price', 'n2', 68,
      "Estimated clean price per 100 face — the last fund mark aged onto today's "
      "curve via the spread it implied. NOT a live quote: the underlying mark is "
-     "typically about 98 days old."),
+     "months old (see the Mark column)."),
     ('ytw', 'YTW', 'pct2', 68,
      "Yield to worst: the lower of yield-to-maturity and yield-to-call. With no "
      "call schedules in free data this equals yield-to-maturity, so for a "
@@ -116,9 +116,10 @@ COLUMNS = [
      "issue size, never the issue size itself — it only counts funds that file "
      "N-PORT."),
     ('mark_age_days', 'Mark', 'days', 58,
-     "Age of the underlying fund mark in days. N-PORT publishes monthly with "
-     "roughly a 60-day lag, so about 98 days is normal rather than stale. Past "
-     "100 days the row is capped."),
+     "Age of the underlying fund mark in days. N-PORT data is released "
+     "quarterly with a 60-day lag, so marks run from about 100 to 190 days old "
+     "over each release cycle. A row is capped when its mark is more than 35 "
+     "days behind the newest mark in the dataset, or older than 200 days."),
     ('_composite_score', 'Comp', 'n1', 60,
      "Composite score, 0-100, weighted across Valuation, Credit, Rates, "
      "Structure and Liquidity. A category that cannot describe an instrument — "
@@ -446,6 +447,7 @@ h2[data-tip]::after {{ content:" \24D8"; opacity:.4; font-size:12px; }}
 &middot; US Treasuries and corporate bonds &middot; free data only</div>
 
 <div class="cards">{cards}</div>
+{vintage_banner}
 
 <div class="panel caveat">
 <h2>What this is, and what it is not</h2>
@@ -700,6 +702,21 @@ def _dist_rows(counts, order=None, total=None):
     return ''.join(out)
 
 
+VINTAGE_WARN_DAYS = 150
+
+
+def vintage_banner(meta):
+    """A prominent warning once the whole N-PORT dataset has gone old."""
+    age = (meta or {}).get('data_vintage_age_days')
+    if age is None or age <= VINTAGE_WARN_DAYS:
+        return ''
+    return (f'<div class="panel caveat"><h2>Marks are {age} days old</h2>'
+            f'<p style="margin:0">The newest fund mark in this dataset is dated '
+            f'{meta.get("data_vintage")}. A newer quarterly N-PORT release is '
+            f'due or already published but not yet loaded; until it is, every '
+            f'price here leans harder on the curve overlay.</p></div>')
+
+
 def render(rows, meta, term, path):
     payload = build_payload(rows)
 
@@ -735,9 +752,9 @@ def render(rows, meta, term, path):
          'underneath in the data; the cap is a statement about our evidence, '
          'not about the bond.'),
         ('Median mark age', f'{mark_age}d',
-         'How old the underlying fund price is. N-PORT publishes monthly with '
-         'about a 60-day lag, so roughly three months is the normal state of '
-         'this model, not a failure. Every price here is that mark aged onto '
+         'How old the underlying fund price is. N-PORT data arrives quarterly '
+         'with a 60-day lag, so 100 to 190 days is the normal state of this '
+         'model, not a failure. Every price here is that mark aged onto '
          "today's curve."),
     ]
     cards = ''.join(
@@ -773,6 +790,7 @@ def render(rows, meta, term, path):
         class_opts=class_opts,
         bucket_opts=bucket_opts,
         payload=dumps_for_script(payload),
+        vintage_banner=vintage_banner(meta),
     )
     with open(path, 'w', encoding='utf-8') as fh:
         fh.write(html)

@@ -166,27 +166,35 @@ def attach_nport_marks(rows, as_of, quarter=None):
             if os.path.isdir(client.cache_dir) else []
         if not available:
             log.info('No N-PORT marks cached; prices will be curve-implied')
-            return 0
+            return 0, None
         quarter = available[-1]
 
     path = os.path.join(client.cache_dir, f'{quarter}_marks.parquet')
     if not os.path.exists(path):
         log.warning('N-PORT marks not found: %s', path)
-        return 0
+        return 0, None
 
     import pandas as pd
     marks = latest_marks(pd.read_parquet(path).to_dict('records'))
     by_cusip = {m['cusip']: m for m in marks}
     log.info('N-PORT %s: %d CUSIPs with marks', quarter, len(by_cusip))
 
+    # The dataset's own freshness. Rows are judged stale against THIS, not
+    # against today: every mark in the newest N-PORT release is already ~100
+    # days old, so wall-clock age says nothing about an individual bond.
+    dates = [_as_date(m['report_date']) for m in marks]
+    dates = [d for d in dates if d is not None and d <= as_of]
+    vintage = max(dates) if dates else None
+    if vintage is not None:
+        log.info('N-PORT data vintage %s (%d days old)', vintage,
+                 (as_of - vintage).days)
+
     matched = 0
     for row in rows:
         mark = by_cusip.get((row.get('cusip') or '').strip().upper())
         if mark is None:
             continue
-        report_date = mark['report_date']
-        if hasattr(report_date, 'date'):
-            report_date = report_date.date()
+        report_date = _as_date(mark['report_date'])
         # A mark from the future relative to the as-of date would be
         # look-ahead bias walked straight into the backtest.
         if report_date > as_of:
@@ -197,6 +205,7 @@ def attach_nport_marks(rows, as_of, quarter=None):
             'price_basis': mark['price_basis'],
             'mark_date': report_date,
             'mark_age_days': (as_of - report_date).days,
+            'mark_lag_days': (vintage - report_date).days,
             'n_funds': int(mark['n_funds']),
             'total_held_usd': mark['total_held_usd'],
             'price_dispersion': mark['price_dispersion'],
@@ -209,7 +218,13 @@ def attach_nport_marks(rows, as_of, quarter=None):
                 row[flag] = True
 
     log.info('N-PORT marks attached to %d of %d rows', matched, len(rows))
-    return matched
+    return matched, vintage
+
+
+def _as_date(value):
+    if value is None:
+        return None
+    return value.date() if hasattr(value, 'date') else value
 
 
 def newest_universe_quarter():
@@ -313,7 +328,7 @@ def apply_fair_value(row, ctx, params, flows, settle):
 
     fair_z = credit.fair_spread(bucket, ttm, ctx.get('bucket_oas'),
                                 term_points=ctx.get('term_points'),
-                                wedge=ctx.get('wedge'), beta=beta,
+                                beta=beta,
                                 term_by_bucket=ctx.get('term_by_bucket'),
                                 bucket_anchors=ctx.get('bucket_anchors'))
     row['fair_spread'] = fair_z
@@ -329,7 +344,7 @@ def apply_fair_value(row, ctx, params, flows, settle):
 
     market = credit.market_implied_bucket(
         observed_z, ttm, ctx.get('bucket_oas'),
-        term_points=ctx.get('term_points'), wedge=ctx.get('wedge'), beta=beta,
+        term_points=ctx.get('term_points'), beta=beta,
         term_by_bucket=ctx.get('term_by_bucket'),
         bucket_anchors=ctx.get('bucket_anchors'))
     row['market_bucket'] = market
@@ -572,7 +587,12 @@ def analyze_bond(row, ctx, settle, params):
     row['roll_down_12m'] = roll_down(curve, ttm, 1.0, mod)
 
     # -- relative value ------------------------------------------------------
-    if row.get('implied_bucket') or row.get('z_spread') is not None:
+    # Government paper has no credit bucket to be fair-valued against; running
+    # it through market_implied_bucket labelled every Treasury 'AAA'.
+    is_government = (row.get('asset_class') or '').startswith(('TREASURY',
+                                                               'AGENCY'))
+    if not is_government and (row.get('implied_bucket')
+                              or row.get('z_spread') is not None):
         apply_fair_value(row, ctx, params, flows, settle)
 
     return row
@@ -772,6 +792,10 @@ def write_snapshot(rows, ctx, settle, as_json=False):
         'term_points': ctx['term_points'],
         'fred_history_source': ctx['fred_source'],
         'count': len(rows),
+        'data_vintage': (ctx['data_vintage'].isoformat()
+                         if ctx.get('data_vintage') else None),
+        'data_vintage_age_days': ((settle - ctx['data_vintage']).days
+                                  if ctx.get('data_vintage') else None),
         'par_curve': ctx['par'],
     }
     meta_path = os.path.join(OUTPUT_DIR, f'run_meta_{stamp}.json')
@@ -857,8 +881,10 @@ def main():
         raw += load_corporate_universe(args.quarter or newest_universe_quarter())
     log.info('  %d reference rows', len(raw))
 
+    ctx['data_vintage'] = None
     if not args.no_marks:
-        attach_nport_marks(raw, settle, quarter=args.marks)
+        _, ctx['data_vintage'] = attach_nport_marks(raw, settle,
+                                                    quarter=args.marks)
 
     log.info('Phase 2: credit model')
     apply_credit_model(raw, params)

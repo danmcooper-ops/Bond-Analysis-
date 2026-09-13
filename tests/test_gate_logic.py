@@ -641,3 +641,34 @@ def test_missing_factors_reweight_rather_than_scoring_zero():
     assert partial['score'] is not None
     assert 0.0 < partial['coverage'] < 1.0
     assert implied_bucket({'int_cov': 8.0})['bucket'] is None   # too thin
+
+
+# --- staleness relative to the data vintage --------------------------------
+
+def test_a_mark_as_fresh_as_the_dataset_is_not_capped_however_old():
+    from scripts.gates import rating_cap_for_row
+    # 132 days old but the newest mark available anywhere: the 2026-09-09
+    # universe, where the wall-clock cap hit 8,909 of 8,968 rows.
+    cap, reasons = rating_cap_for_row({'mark_age_days': 132, 'mark_lag_days': 0})
+    assert not any('stale mark' in r for r in reasons)
+
+
+def test_a_mark_lagging_the_dataset_is_capped():
+    from scripts.gates import rating_cap_for_row
+    cap, reasons = rating_cap_for_row({'mark_age_days': 160, 'mark_lag_days': 61})
+    assert cap == 'HOLD'
+    assert any('behind the newest' in r for r in reasons)
+
+
+def test_a_dataset_past_the_hard_limit_is_capped():
+    from scripts.gates import rating_cap_for_row
+    cap, reasons = rating_cap_for_row({'mark_age_days': 230, 'mark_lag_days': 0})
+    assert cap == 'HOLD'
+    assert any('230d old' in r for r in reasons)
+
+
+def test_roll_gates_are_inapplicable_inside_the_horizon():
+    from scripts.gates import _appl_rolls
+    assert not _appl_rolls({'coupon_type': 'None', 'years_to_maturity': 0.3})
+    assert not _appl_rolls({'coupon_type': 'Fixed', 'years_to_maturity': 0.9})
+    assert _appl_rolls({'coupon_type': 'Fixed', 'years_to_maturity': 1.5})

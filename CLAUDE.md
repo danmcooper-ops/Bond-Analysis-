@@ -96,8 +96,9 @@ These are not caveats to bury; they belong on the report itself.
   number is an extrapolation (spread aged forward on the FRED bucket-OAS move)
   and is labelled `clean_price_est`, never `price`.
 - **No true OAS.** That needs a call schedule and a swaption vol surface,
-  neither of which is free. We report Z-spread and compare it to the FRED
-  bucket OAS index with a wedge *fitted from data, not assumed*. For callables
+  neither of which is free. We report Z-spread and compare it to a fair
+  spread anchored on the median observed spread of the model's own credit
+  buckets (`scripts/calibrate_credit.py`), not on the published index. For callables
   priced above par with an unknown call schedule, the signal is weak — that
   case is a HOLD cap rather than a pretence.
 - **No agency ratings.** The implied bucket is a fundamentals scorecard

@@ -32,7 +32,8 @@ from scripts.config import (FINANCIAL_SECTOR_NAME, MATURITY_BUCKETS,
                             MIN_CUSIP_MATCH_CONFIDENCE, MIN_FUNDS_FOR_BUY,
                             SCORE_WEIGHT_CREDIT, SCORE_WEIGHT_LIQUIDITY,
                             SCORE_WEIGHT_RATES, SCORE_WEIGHT_STRUCTURE,
-                            SCORE_WEIGHT_VALUATION, STALE_MARK_DAYS)
+                            SCORE_WEIGHT_VALUATION,
+                            HARD_STALE_MARK_DAYS, STALE_MARK_LAG_DAYS)
 from scripts.scoring_kernel import (RATING_RANK, Gate, ScoringSpec,
                                     _score_linear)
 
@@ -119,6 +120,21 @@ def _appl_fixed_coupon(r):
         return False
     ctype = (r.get('coupon_type') or 'Fixed').strip().lower()
     return ctype in ('fixed', 'none', '')
+
+
+ROLL_HORIZON_YEARS = 1.0
+
+
+def _appl_rolls(r):
+    """Roll-down and carry are measured over a 12-month horizon.
+
+    Paper maturing inside the horizon has no roll to measure — roll_down()
+    returns None by construction — so the gate is inapplicable, not missing.
+    Scored as missing, it put a zero in two Rates gates for every bill and
+    left 94% of them PASS before any cap.
+    """
+    return (_appl_fixed_coupon(r)
+            and (r.get('years_to_maturity') or 0.0) > ROLL_HORIZON_YEARS)
 
 
 def _appl_issuer_field(row, *fields):
@@ -345,12 +361,12 @@ GATES = [
     Gate('Rates: Roll Down', 'roll_down_12m',
          lambda v, r: v > 0 if v is not None else None,
          lambda v, r, pct: _score_linear(v, -0.01, 0.02),
-         applicable=_appl_fixed_coupon),
+         applicable=_appl_rolls),
     Gate('Rates: Carry and Roll', 'carry_roll_12m',
          lambda v, r: v > (r.get('_front_end_yield') or 0)
          if v is not None else None,
          _score_carry_and_roll,
-         applicable=_appl_fixed_coupon),
+         applicable=_appl_rolls),
 
     # ---- Structure (0.12) ------------------------------------------------
     Gate('Structure: Seniority', 'seniority_rank',
@@ -572,9 +588,15 @@ def rating_cap_for_row(row, params=None):
         add('HOLD', 'callable above par with unknown call schedule')
 
     # -- the data is too old or too thin -----------------------------------
+    # Lag behind the dataset's newest mark, not wall-clock age: see
+    # STALE_MARK_LAG_DAYS in config.py for why the latter capped everything.
+    lag = row.get('mark_lag_days')
     age = row.get('mark_age_days')
-    if age is not None and age > p.get('stale_mark_days', STALE_MARK_DAYS):
-        add('HOLD', f'stale mark ({age}d)')
+    if lag is not None and lag > p.get('stale_mark_lag_days', STALE_MARK_LAG_DAYS):
+        add('HOLD', f'stale mark ({lag}d behind the newest N-PORT mark)')
+    elif age is not None and age > p.get('hard_stale_mark_days',
+                                         HARD_STALE_MARK_DAYS):
+        add('HOLD', f'stale mark ({age}d old)')
 
     n_funds = row.get('n_funds')
     if n_funds is not None and n_funds < p.get('min_funds_for_buy',

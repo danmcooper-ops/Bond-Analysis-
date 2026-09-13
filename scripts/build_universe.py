@@ -189,6 +189,9 @@ def build(quarter, as_of, min_funds, min_held, audit=0):
         row['report_date'] = report_date
         row['mark_date'] = report_date
         row['mark_age_days'] = (as_of - report_date).days
+        # Staleness relative to the dataset, which is what the rating cap
+        # reads; analyze_bonds recomputes it when it attaches marks.
+        row['mark_lag_days'] = (fundamentals_asof - report_date).days
         row['years_to_maturity'] = years
         row['asset_class'] = 'CORP_IG'      # refined by the credit model at M6
         row['coupon_rate'] = mark.get('annualized_rate')

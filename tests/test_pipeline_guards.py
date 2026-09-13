@@ -74,3 +74,12 @@ def test_healthy_mix_raises_nothing():
             + _rows('TREASURY', ['BUY'] + ['HOLD'] * 9))
     mix, capped = rating_mix(rows)
     assert rating_alerts(mix, capped, prior_mix=mix) == []
+
+
+def test_vintage_banner_appears_only_once_the_dataset_is_old():
+    from scripts.report_html import vintage_banner
+    assert vintage_banner({'data_vintage_age_days': 120}) == ''
+    assert vintage_banner({}) == ''
+    html = vintage_banner({'data_vintage_age_days': 171,
+                           'data_vintage': '2026-04-30'})
+    assert '171 days old' in html and '2026-04-30' in html
