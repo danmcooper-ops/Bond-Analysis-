@@ -83,3 +83,40 @@ def test_vintage_banner_appears_only_once_the_dataset_is_old():
     html = vintage_banner({'data_vintage_age_days': 171,
                            'data_vintage': '2026-04-30'})
     assert '171 days old' in html and '2026-04-30' in html
+
+
+# --- calibration hygiene ------------------------------------------------------
+
+def test_thresholds_ignore_nan_scores():
+    from scripts.calibrate_thresholds import thresholds_for
+    clean = [float(i) for i in range(200)]
+    with_nan = clean + [float('nan')] * 5
+    assert thresholds_for(with_nan) == thresholds_for(clean)
+    cuts = thresholds_for(with_nan)
+    assert cuts['buy'] > cuts['lean'] > cuts['pass']
+
+
+def test_term_fit_counts_each_observation_once():
+    from scripts.fit_term_structure import BUCKETS, fit
+    label = BUCKETS[3][2]
+    buckets = {label: [0.01] * 600, f'mid|{label}': [0.01] * 600}
+    assert fit(buckets)['n_observations'] == 600
+
+
+def test_backtest_anchors_come_from_same_date_peers(monkeypatch):
+    from datetime import date
+
+    import scripts.backtest as bt
+    pit = bt.PointInTime()
+    monkeypatch.setattr(pit, 'term_points', lambda when: None)
+    monkeypatch.setattr('scripts.fit_term_structure.load_tiered', lambda: None)
+    when_a, when_b = date(2025, 4, 30), date(2026, 4, 30)
+    rows = ([{'cusip': f'A{i}', 'report_date': when_a} for i in range(60)]
+            + [{'cusip': f'B{i}', 'report_date': when_b} for i in range(60)])
+    spreads = {when_a: 0.010, when_b: 0.020}
+    monkeypatch.setattr(bt, '_compute_base_signal', lambda row, p, params: {
+        'implied_bucket': 'BBB', 'z_spread': spreads[row['report_date']],
+        'years_to_maturity': 5.0})
+    pit.register(rows)
+    assert pit.anchors(when_a, {})['BBB'] == 0.010
+    assert pit.anchors(when_b, {})['BBB'] == 0.020

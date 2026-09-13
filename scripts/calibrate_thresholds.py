@@ -62,7 +62,9 @@ def thresholds_for(scores, target=None):
     fitted to nine bonds.
     """
     target = target or DEFAULT_TARGET
-    values = sorted(s for s in scores if s is not None)
+    # NaN passes `is not None` and scrambles sorted(): 5 NaNs in 205 scores
+    # produced pass (56.3) above lean (49.5).
+    values = sorted(s for s in scores if s is not None and s == s)
     if len(values) < MIN_ROWS:
         return None
 
@@ -91,7 +93,8 @@ def _class_key(asset_class):
 def load_rows(path):
     if path.endswith('.parquet'):
         import pandas as pd
-        return pd.read_parquet(path).to_dict('records')
+        frame = pd.read_parquet(path)
+        return frame.astype(object).where(pd.notna(frame), None).to_dict('records')
     with open(path, encoding='utf-8') as fh:
         payload = json.load(fh)
     return payload.get('results', payload)
@@ -136,7 +139,7 @@ def main():
                   f"(need {MIN_ROWS}); falls back to the base thresholds")
             continue
         results[key] = cuts
-        valid = [s for s in scores if s is not None]
+        valid = [s for s in scores if s is not None and s == s]
         counts = Counter(
             'BUY' if s >= cuts['buy'] else
             'LEAN BUY' if s >= cuts['lean'] else
@@ -155,6 +158,12 @@ def main():
 
     if not results:
         raise SystemExit('[fatal] nothing calibrated')
+
+    inverted = {k: c for k, c in results.items()
+                if not c['buy'] > c['lean'] > c['pass']}
+    if inverted:
+        raise SystemExit('[fatal] thresholds not strictly ordered '
+                         f'(buy > lean > pass): {inverted}; refusing to use them')
 
     if args.apply:
         _apply(results)

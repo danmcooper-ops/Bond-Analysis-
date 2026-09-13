@@ -174,6 +174,9 @@ class PointInTime:
         self._term = {}
         self._fundamentals = {}
         self._crosswalks = {}
+        self._population = {}
+        self._base = {}
+        self._anchors = {}
         self._tc = TreasuryCurveClient()
         self._fred = FREDClient()
 
@@ -228,8 +231,71 @@ class PointInTime:
         return self._fundamentals[key], self._crosswalks[key]
 
 
+    def register(self, rows):
+        """The panel rows observed on each date, for fitting anchors."""
+        for row in rows:
+            bucket = self._population.setdefault(row['report_date'], {})
+            bucket[row['cusip']] = row
+
+    def anchors(self, when, params):
+        """Bucket anchors fitted from the bonds observed ON `when`.
+
+        The pipeline's anchors come from the newest snapshot; using those for
+        every historical date put the future level of each bucket's spread
+        into every past fair spread, so any later market-wide widening or
+        tightening leaked into the mispricing signal. Same-date peers are
+        information that existed when the price was struck.
+        """
+        if when not in self._anchors:
+            from scripts.fit_term_structure import load_tiered
+            base = [_base_signal(row, self, params)
+                    for row in self._population.get(when, {}).values()]
+            rows = [{'implied_bucket': b['implied_bucket'],
+                     'z_spread': b['z_spread'],
+                     'years_to_maturity': b['years_to_maturity']}
+                    for b in base if b is not None]
+            fitted = credit.fit_bucket_anchors(
+                rows, term_points=self.term_points(when),
+                term_by_bucket=load_tiered())
+            self._anchors[when] = ({k: v for k, v in fitted.items()
+                                    if not k.startswith('_')} or None)
+        return self._anchors[when]
+
+
 def signals_at(row, pit, params):
     """Score one observation using only information available on its date."""
+    base = _base_signal(row, pit, params)
+    if base is None:
+        return None
+    when = row['report_date']
+    bucket, z, ttm = base['implied_bucket'], base['z_spread'], base['years_to_maturity']
+
+    oas = pit.bucket_oas(when)
+    term = pit.term_points(when)
+    beta = params.get('fair_spread_term_beta', 1.0)
+    from scripts.fit_term_structure import load_tiered
+    tiered, anchors = load_tiered(), pit.anchors(when, params)
+    fair = credit.fair_spread(bucket, ttm, oas, term_points=term, beta=beta,
+                              term_by_bucket=tiered, bucket_anchors=anchors)
+    market = credit.market_implied_bucket(z, ttm, oas, term_points=term,
+                                          beta=beta, term_by_bucket=tiered,
+                                          bucket_anchors=anchors)
+    gap = credit.divergence(bucket, market)
+
+    return {**base, 'market_bucket': market, 'divergence': gap['notches'],
+            'fair_spread': fair,
+            'spread_mispricing': credit.spread_mispricing(z, fair)}
+
+
+def _base_signal(row, pit, params):
+    """Everything about one observation that does not depend on its peers."""
+    key = (row['cusip'], row['report_date'])
+    if key not in pit._base:
+        pit._base[key] = _compute_base_signal(row, pit, params)
+    return pit._base[key]
+
+
+def _compute_base_signal(row, pit, params):
     when = row['report_date']
     curve = pit.curve(when)
     if curve is None:
@@ -280,26 +346,10 @@ def signals_at(row, pit, params):
             sector=entry.get('sector'), params=params)
         bucket = result.get('bucket')
 
-    oas = pit.bucket_oas(when)
-    term = pit.term_points(when)
-    beta = params.get('fair_spread_term_beta', 1.0)
-    from scripts.calibrate_credit import load_anchors
-    from scripts.fit_term_structure import load_tiered
-    tiered, anchors = load_tiered(), load_anchors()
-    fair = credit.fair_spread(bucket, ttm, oas, term_points=term, beta=beta,
-                              term_by_bucket=tiered, bucket_anchors=anchors)
-    market = credit.market_implied_bucket(z, ttm, oas, term_points=term,
-                                          beta=beta, term_by_bucket=tiered,
-                                          bucket_anchors=anchors)
-    gap = credit.divergence(bucket, market)
-
     return {
         'bond': bond, 'z_spread': z, 'modified_duration': mod,
         'convexity': cvx, 'years_to_maturity': ttm, 'accrued': accrued,
-        'implied_bucket': bucket, 'market_bucket': market,
-        'divergence': gap['notches'],
-        'fair_spread': fair,
-        'spread_mispricing': credit.spread_mispricing(z, fair),
+        'implied_bucket': bucket,
     }
 
 
@@ -310,6 +360,7 @@ def signals_at(row, pit, params):
 def measure(pairs, pit, params):
     """Signal at t0 joined to realised excess return t0 -> t1."""
     out, dropped = [], Counter()
+    pit.register(r for earlier, later, _ in pairs for r in (earlier, later))
     for earlier, later, gap in pairs:
         signal = signals_at(earlier, pit, params)
         if signal is None:

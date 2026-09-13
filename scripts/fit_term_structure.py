@@ -181,12 +181,19 @@ def collect_spreads(min_funds=5):
                                        convention=bond.convention)
             spread = z_spread(record['clean_price_marked'] + accrued, flows,
                               curve_date, curve)
-            if spread is None or not (IG_SPREAD_MIN < spread < IG_SPREAD_MAX):
+            # The tiers reach wider than the IG proxy (wide runs to 300bp), so
+            # filter at the widest tier and apply the IG cap to the universe
+            # curve only. Filtering everything at 250bp left the 'wide' tier's
+            # top 50bp permanently empty.
+            if spread is None or not (IG_SPREAD_MIN < spread < TIERS[-1][2]):
                 continue
             label, _ = _bucket_for(years_to_maturity(curve_date, bond.maturity))
             if not label:
                 continue
-            buckets[label].append(spread)
+            if spread < IG_SPREAD_MAX:
+                buckets[label].append(spread)
+            # Tier observations are a SUBSET view of the same spreads, kept
+            # under 'tier|label' keys; fit() must not count them again.
             for tier, lo, hi in TIERS:
                 if lo <= spread < hi:
                     buckets[f'{tier}|{label}'].append(spread)
@@ -199,7 +206,8 @@ def collect_spreads(min_funds=5):
 
 def fit(buckets):
     """Normalise each bucket's median spread to the whole-universe median."""
-    everything = [s for values in buckets.values() for s in values]
+    everything = [s for key, values in buckets.items() if '|' not in key
+                  for s in values]
     if len(everything) < 500:
         raise SystemExit(f'[fatal] only {len(everything)} observations')
     overall = statistics.median(everything)
