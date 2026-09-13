@@ -34,8 +34,11 @@ def _attach_file_handler(root, directory, run_date):
     try:
         os.makedirs(directory, exist_ok=True)
         stamp = (run_date or date.today()).isoformat()
+        # delay=True: the file is created on the first record, not at import.
+        # Merely importing a data module used to leave an empty run log.
         handler = logging.FileHandler(
-            os.path.join(directory, f'run_{stamp}.log'), encoding='utf-8')
+            os.path.join(directory, f'run_{stamp}.log'), encoding='utf-8',
+            delay=True)
     except OSError:
         # A read-only or missing output dir must never stop an analysis run;
         # console logging still works.

@@ -552,3 +552,17 @@ def test_mspd_cache_from_before_the_tranche_fix_is_ignored(tmp_path):
         json.dump({'version': CACHE_VERSION, 'record_date': '2026-08-31',
                    'amounts': {'X': 1.0}}, fh)
     assert client._load_cache()['amounts'] == {'X': 1.0}
+
+
+def test_importing_logging_creates_no_file_until_something_is_logged(tmp_path):
+    import os
+
+    from data import logging_setup
+    original = os.path.dirname(logging_setup._FILE_HANDLER.baseFilename)
+    try:
+        logging_setup.configure(log_dir=str(tmp_path), run_date=date(2026, 9, 5))
+        assert list(tmp_path.iterdir()) == []
+        logging_setup.get_logger('t').info('hello')
+        assert [p.name for p in tmp_path.iterdir()] == ['run_2026-09-05.log']
+    finally:
+        logging_setup.configure(log_dir=original)
