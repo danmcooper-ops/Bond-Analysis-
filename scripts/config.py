@@ -32,11 +32,11 @@ RATING_THRESHOLD_PASS = 25
 # Populated by calibrate.py; kept explicit from v1 so the comparability
 # problem can never be silently ignored.
 RATING_THRESHOLDS_BY_CLASS = {
-    'TREASURY': {'buy': 72.5, 'lean': 62.6, 'pass': 51.0},
+    'TREASURY': {'buy': 72.8, 'lean': 64.1, 'pass': 53.8},
     'AGENCY': {},
-    'CORP_IG': {'buy': 65.3, 'lean': 41.7, 'pass': 29.8},
-    'CORP_HY': {'buy': 66.2, 'lean': 53.9, 'pass': 37.6},
-    'TREASURY_BILL': {'buy': 72.5, 'lean': 62.6, 'pass': 51.0},
+    'CORP_IG': {'buy': 65.3, 'lean': 41.4, 'pass': 29.7},
+    'CORP_HY': {'buy': 66.1, 'lean': 54.4, 'pass': 38.0},
+    'TREASURY_BILL': {'buy': 72.8, 'lean': 64.1, 'pass': 53.8},
 }
 
 # ---------------------------------------------------------------------------
@@ -87,11 +87,11 @@ CREDIT_BUCKETS = ('AAA', 'AA', 'A', 'BBB', 'BB', 'B', 'CCC')
 # Score cutpoints, high to low. Calibrated monthly against the market: the
 # cutpoints are chosen so each implied bucket's median observed Z-spread lines
 # up with the FRED bucket OAS + fitted wedge. These are the seed values.
-CREDIT_CUT_AAA = 59.2
-CREDIT_CUT_AA = 51.1
+CREDIT_CUT_AAA = 57.6
+CREDIT_CUT_AA = 50.5
 CREDIT_CUT_A = 44.7
-CREDIT_CUT_BBB = 41.0
-CREDIT_CUT_BB = 36.3
+CREDIT_CUT_BBB = 42.1
+CREDIT_CUT_BB = 38.0
 CREDIT_CUT_B = 9.4
 
 # Issuer scorecard: (field, worst, best, weight).
