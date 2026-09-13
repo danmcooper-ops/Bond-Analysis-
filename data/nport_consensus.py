@@ -103,10 +103,14 @@ DECIMAL_ONLY_BELOW = 0.10
 PLAUSIBLE_YIELD = (0.01, 0.15)
 
 _TITLE_PCT = re.compile(r'(\d{1,2}(?:\.\d+)?)\s*%')
-# Bloomberg-style ticker titles: "EEFT 0 5/8 10/01/30", "LABL 10.5 07/15/27".
+# Bloomberg-style ticker titles: "EEFT 0 5/8 10/01/30", "LABL 10.5 07/15/27",
+# and a bare fraction, "ACAFP 1/2 07/21/27".
 _TITLE_TICKER = re.compile(
-    r'^[A-Z0-9&.\-]+\s+(\d{1,2}(?:\.\d+)?)(?:\s+(\d)/(\d{1,2}))?\s+'
-    r'\d{1,2}/\d{1,2}/\d{2,4}\b')
+    r'^[A-Z0-9&.\-]+\s+(?:(\d{1,2}(?:\.\d+)?)(?:\s+(\d)/(\d{1,2}))?'
+    r'|(\d)/(\d{1,2}))\s+\d{1,2}/\d{1,2}/\d{2,4}\b')
+
+# Government paper has not carried a double-digit coupon in decades.
+GOVERNMENT_ISSUER_TYPES = ('UST', 'USGA', 'USGSE')
 
 
 def coupon_from_title(title):
@@ -119,6 +123,8 @@ def coupon_from_title(title):
         return float(m.group(1))
     m = _TITLE_TICKER.match(text)
     if m:
+        if m.group(1) is None:
+            return int(m.group(4)) / int(m.group(5))
         value = float(m.group(1))
         if m.group(2):
             value += int(m.group(2)) / int(m.group(3))
@@ -148,7 +154,7 @@ def _resolve_ambiguous(value, context):
             return value, False
         if abs(stated - value * 100.0) <= max(0.05, 0.02 * stated):
             return value * 100.0, False
-    if ctx.get('is_convertible'):
+    if ctx.get('is_convertible') or ctx.get('issuer_type') in GOVERNMENT_ISSUER_TYPES:
         return value, False
 
     price, years = ctx.get('price'), ctx.get('years')
@@ -293,6 +299,7 @@ def consensus_mark(holdings, mad_k=CONSENSUS_MAD_K,
         coupon_context = {
             'title_of_issue': _modal([r.get('title_of_issue') for r in rows]),
             'is_convertible': any(r.get('is_convertible') for r in rows),
+            'issuer_type': _modal([r.get('issuer_type') for r in rows]),
             'price': centre, 'years': years}
         coupons, coupon_ambiguous = _normalise(raw_coupons, coupon_context)
 

@@ -337,6 +337,7 @@ from data.nport_consensus import coupon_from_title, coupon_units_ambiguous
 
 @pytest.mark.parametrize('title, expected', [
     ('EEFT 0 5/8 10/01/30', 0.625),
+    ('ACAFP 1/2 07/21/27', 0.5),
     ('LABL 10.5 07/15/27 144A', 10.5),
     ('REDFIN CORP CONV 0.5% 04/01/2027', 0.5),
     ('ACME CORP SR NOTE 5.000% 06/15/35', 5.0),
@@ -415,3 +416,11 @@ def test_an_amendment_supersedes_the_original_for_the_same_series_month():
     series = {'orig': 'S1', 'amend': 'S1', 'other-fund': 'S2'}
     assert latest_filings(subs, series) == {
         'amend': month, 'other-fund': month, 'no-series': month}
+
+
+def test_government_low_coupons_stay_percent():
+    # 0.125% TIPS at par: no yield test can separate the readings, but a
+    # 12.5% Treasury coupon does not exist.
+    ctx = {'issuer_type': 'UST', 'price': 101.3, 'years': 0.9}
+    assert normalise_coupon_units([0.125], ctx) == pytest.approx([0.125])
+    assert not coupon_units_ambiguous([0.125], ctx)
