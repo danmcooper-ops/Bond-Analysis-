@@ -482,6 +482,12 @@ def _analyzability_score(row):
     # Terms sourced from a single fund with nothing to corroborate them.
     if row.get('n_funds') == 1 or row.get('_identity_conflict'):
         score -= 20.0
+    # Nothing could tell a 0.25% coupon from a 25% one.
+    if row.get('_coupon_unit_ambiguous'):
+        score -= 20.0
+    # The mark's spread would not solve, so the price is the raw mark.
+    if row.get('_spread_unsolved'):
+        score -= 30.0
     if row.get('is_likely_callable') and not row.get('call_schedule'):
         score -= 10.0
     return max(0.0, score)
@@ -571,6 +577,10 @@ def rating_cap_for_row(row, params=None):
         add('HOLD', 'no usable price mark')
     if row.get('ytm_solver_failed'):
         add('HOLD', 'yield solver did not converge')
+    if row.get('_spread_unsolved'):
+        add('HOLD', 'spread did not solve — price is the raw mark')
+    if row.get('_coupon_unit_ambiguous'):
+        add('HOLD', 'coupon units ambiguous (percent or fraction)')
     if row.get('is_inflation_linked'):
         add('HOLD', 'inflation-linked — priced nominally, understated')
     ctype = (row.get('coupon_type') or 'Fixed').strip().lower()

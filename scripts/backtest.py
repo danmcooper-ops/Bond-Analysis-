@@ -235,7 +235,7 @@ def signals_at(row, pit, params):
     if curve is None:
         return None
 
-    bond, reason = from_row({**row, 'coupon_rate': row.get('annualized_rate')},
+    bond, reason = from_row({**row, 'coupon_rate': None},
                             settle=when)
     if bond is None:
         return None

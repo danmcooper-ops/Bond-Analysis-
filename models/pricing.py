@@ -117,7 +117,8 @@ def bond_flows_and_stub(coupon_rate, maturity, settle, frequency=2,
                         eom=None):
     """Return (flows, w) for a bond — the two inputs every pricing call needs."""
     flows = cashflows(face, coupon_rate, maturity, frequency=frequency,
-                      settle=settle, dated_date=dated_date, eom=eom)
+                      settle=settle, dated_date=dated_date, eom=eom,
+                      convention=convention)
     w = stub_factor(settle, maturity, frequency=frequency,
                     convention=convention, dated_date=dated_date, eom=eom)
     return flows, w

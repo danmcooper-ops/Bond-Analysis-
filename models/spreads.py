@@ -64,7 +64,12 @@ def price_from_zero_curve(flows, settle, curve, spread=0.0,
     return total
 
 
-def z_spread(dirty, flows, settle, curve, lo=-0.02, hi=0.50):
+# Distressed paper (PDVSA marked at 33) needs spreads far past 50%; capped
+# there, the solve failed and the bond was repriced as if it were a Treasury.
+Z_SPREAD_MAX = 3.0
+
+
+def z_spread(dirty, flows, settle, curve, lo=-0.02, hi=Z_SPREAD_MAX):
     """Constant spread over the zero curve that reprices `flows` to `dirty`.
 
     A bond priced exactly off the curve has a Z-spread of zero — which is the

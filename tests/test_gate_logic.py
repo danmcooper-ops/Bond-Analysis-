@@ -672,3 +672,12 @@ def test_roll_gates_are_inapplicable_inside_the_horizon():
     assert not _appl_rolls({'coupon_type': 'None', 'years_to_maturity': 0.3})
     assert not _appl_rolls({'coupon_type': 'Fixed', 'years_to_maturity': 0.9})
     assert _appl_rolls({'coupon_type': 'Fixed', 'years_to_maturity': 1.5})
+
+
+def test_unsolved_spread_and_ambiguous_coupon_are_capped():
+    from scripts.gates import _analyzability_score, rating_cap_for_row
+    cap, reasons = rating_cap_for_row({'_spread_unsolved': True})
+    assert cap == 'HOLD' and any('spread did not solve' in r for r in reasons)
+    cap, reasons = rating_cap_for_row({'_coupon_unit_ambiguous': True})
+    assert cap == 'HOLD' and any('coupon units ambiguous' in r for r in reasons)
+    assert _analyzability_score({'_coupon_unit_ambiguous': True}) == 80.0

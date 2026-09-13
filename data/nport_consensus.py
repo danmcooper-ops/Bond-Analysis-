@@ -13,6 +13,7 @@ to bring itself inside three sigma. MAD has a breakdown point of 50%: half the
 marks would have to be wrong before it moves.
 """
 
+import re
 import statistics
 from collections import Counter, defaultdict
 
@@ -89,7 +90,82 @@ def reject_outliers(prices, mad_k=CONSENSUS_MAD_K, floor=MIN_OUTLIER_BAND):
     return (kept, rejected) if kept else (list(prices), [])
 
 
-def normalise_coupon_units(coupons):
+# Coupons below this in a wholly-low group can only be decimal fractions: no
+# real bond pays 0.05%, so 0.05 is a 5% coupon written as a fraction.
+DECIMAL_ONLY_BELOW = 0.10
+
+# Between DECIMAL_ONLY_BELOW and 0.5 a value is genuinely ambiguous: 0.25 is
+# a 0.25% convertible or a 25% coupon written as a fraction. Plausible band
+# for an approximate yield when using the price to tell them apart.
+# The floor matters: a sub-1% yield is not something a non-convertible bond
+# prices to, which is what rules out "0.125% at par" in favour of 12.5%.
+PLAUSIBLE_YIELD = (0.01, 0.15)
+
+_TITLE_PCT = re.compile(r'(\d{1,2}(?:\.\d+)?)\s*%')
+# Bloomberg-style ticker titles: "EEFT 0 5/8 10/01/30", "LABL 10.5 07/15/27".
+_TITLE_TICKER = re.compile(
+    r'^[A-Z0-9&.\-]+\s+(\d{1,2}(?:\.\d+)?)(?:\s+(\d)/(\d{1,2}))?\s+'
+    r'\d{1,2}/\d{1,2}/\d{2,4}\b')
+
+
+def coupon_from_title(title):
+    """The coupon a title states, in percent, or None."""
+    text = (title or '').strip().upper()
+    if not text:
+        return None
+    m = _TITLE_PCT.search(text)
+    if m:
+        return float(m.group(1))
+    m = _TITLE_TICKER.match(text)
+    if m:
+        value = float(m.group(1))
+        if m.group(2):
+            value += int(m.group(2)) / int(m.group(3))
+        return value
+    return None
+
+
+def _approx_yield(coupon_pct, price, years):
+    """Textbook YTM approximation; enough to rule an interpretation out."""
+    if not price or not years or years <= 0:
+        return None
+    return ((coupon_pct + (100.0 - price) / years)
+            / ((100.0 + price) / 2.0))
+
+
+def _resolve_ambiguous(value, context):
+    """Percent or fraction, for a coupon in [DECIMAL_ONLY_BELOW, 0.5).
+
+    Returns (percent_value, ambiguous). Evidence, strongest first: what the
+    title says, a convertible flag (low coupons are what convertibles pay),
+    then which reading gives a yield a bond at this price could have.
+    """
+    ctx = context or {}
+    stated = coupon_from_title(ctx.get('title_of_issue'))
+    if stated is not None:
+        if abs(stated - value) <= 0.02:
+            return value, False
+        if abs(stated - value * 100.0) <= max(0.05, 0.02 * stated):
+            return value * 100.0, False
+    if ctx.get('is_convertible'):
+        return value, False
+
+    price, years = ctx.get('price'), ctx.get('years')
+    as_pct = _approx_yield(value, price, years)
+    as_frac = _approx_yield(value * 100.0, price, years)
+    lo, hi = PLAUSIBLE_YIELD
+    pct_ok = as_pct is not None and lo <= as_pct <= hi
+    frac_ok = as_frac is not None and lo <= as_frac <= hi
+    if pct_ok and not frac_ok:
+        return value, False
+    if frac_ok and not pct_ok:
+        return value * 100.0, False
+    # No evidence either way. Keep the smaller reading and say so: a coupon
+    # inflated 100x produced a 2,005bp Z-spread on a 0.25% note and ranked it.
+    return value, True
+
+
+def normalise_coupon_units(coupons, context=None):
     """Put every reported coupon on the same scale — percent.
 
     ANNUALIZED_RATE IS MIXED-UNITS IN THE SOURCE DATA. Some funds report a
@@ -98,25 +174,32 @@ def normalise_coupon_units(coupons):
     [0.0788, 7.875, 7.88]. Roughly 17,000 CUSIPs in 2026Q2 span both
     conventions.
 
-    Left alone this is not a cosmetic problem. The modal value would be picked
-    arbitrarily from whichever convention happened to be more common, so a
-    7.875% bond could enter the model with a 0.0788% coupon — and then price,
-    yield, duration and spread would all be computed from it.
-
     Where a group spans both conventions the percent-scale values identify the
     truth and the decimals are rescaled to match. Where a group is entirely
-    sub-0.5, it is rescaled too: a genuine corporate coupon below half a
-    percent is close to nonexistent, whereas this encoding demonstrably is
-    not. Exactly zero is left alone — that is a real zero-coupon bond.
+    below 0.5, values under 0.10 are fractions (no bond pays 0.05%), but 0.10
+    to 0.5 is genuinely ambiguous — 0.25 is a 0.25% convertible as often as a
+    25% coupon — and is resolved from `context` (title_of_issue,
+    is_convertible, price, years). Exactly zero is left alone: that is a real
+    zero-coupon bond.
+
+    Use coupon_units_ambiguous() to learn whether the evidence ran out.
     """
+    return _normalise(coupons, context)[0]
+
+
+def coupon_units_ambiguous(coupons, context=None):
+    return _normalise(coupons, context)[1]
+
+
+def _normalise(coupons, context):
     present = [c for c in coupons if c is not None]
     if not present:
-        return []
+        return [], False
 
     pct_like = [c for c in present if c >= 0.5]
     dec_like = [c for c in present if 0 < c < 0.5]
     if not dec_like:
-        return present
+        return present, False
 
     if pct_like:
         # The group tells us its own scale: rescale only the decimals that
@@ -125,9 +208,30 @@ def normalise_coupon_units(coupons):
         reference = _median(pct_like)
         tolerance = max(0.05, 0.02 * reference)
         return [c * 100.0 if (0 < c < 0.5 and abs(c * 100.0 - reference) <= tolerance)
-                else c for c in present]
+                else c for c in present], False
 
-    return [c * 100.0 if 0 < c < 0.5 else c for c in present]
+    small = [c for c in dec_like if c < DECIMAL_ONLY_BELOW]
+    mid = [c for c in dec_like if c >= DECIMAL_ONLY_BELOW]
+    if not mid:
+        return [c * 100.0 if 0 < c < 0.5 else c for c in present], False
+
+    # A fraction in the group that lands on the mid value once rescaled means
+    # the mid value was already percent: [0.125, 0.00125] is one 0.125% bond.
+    if any(abs(s * 100.0 - m) <= 0.02 for s in small for m in mid):
+        scale_mid, ambiguous = 1.0, False
+    else:
+        resolved, ambiguous = _resolve_ambiguous(_median(mid), context)
+        scale_mid = 100.0 if resolved != _median(mid) else 1.0
+
+    out = []
+    for c in present:
+        if 0 < c < DECIMAL_ONLY_BELOW:
+            out.append(c * 100.0)
+        elif DECIMAL_ONLY_BELOW <= c < 0.5:
+            out.append(c * scale_mid)
+        else:
+            out.append(c)
+    return out, ambiguous
 
 
 def _coupons_conflict(coupons, tolerance=COUPON_CONFLICT_TOLERANCE):
@@ -177,8 +281,19 @@ def consensus_mark(holdings, mad_k=CONSENSUS_MAD_K,
         maturities = [r.get('maturity_date') for r in rows]
         # Reconcile the mixed percent/decimal encoding BEFORE anything reads
         # a coupon — the modal pick and the conflict test both depend on it.
-        coupons = normalise_coupon_units(
-            [r.get('annualized_rate') for r in rows])
+        raw_coupons = [r.get('annualized_rate') for r in rows]
+        maturity = _modal(maturities)
+        years = None
+        if maturity is not None and hasattr(report_date, 'year'):
+            try:
+                years = (_as_date(maturity) - _as_date(report_date)).days / 365.25
+            except TypeError:
+                years = None
+        coupon_context = {
+            'title_of_issue': _modal([r.get('title_of_issue') for r in rows]),
+            'is_convertible': any(r.get('is_convertible') for r in rows),
+            'price': centre, 'years': years}
+        coupons, coupon_ambiguous = _normalise(raw_coupons, coupon_context)
 
         # Two funds reporting materially different terms for one CUSIP means
         # at least one is wrong, and there is no way to tell which. Flagged so
@@ -221,6 +336,7 @@ def consensus_mark(holdings, mad_k=CONSENSUS_MAD_K,
             'is_paid_kind': any(r.get('is_paid_kind') for r in rows),
             'is_convertible': any(r.get('is_convertible') for r in rows),
             '_identity_conflict': identity_conflict,
+            '_coupon_unit_ambiguous': coupon_ambiguous,
         })
 
     if out:
@@ -231,6 +347,19 @@ def consensus_mark(holdings, mad_k=CONSENSUS_MAD_K,
                  'conflicts, %d outlier marks rejected',
                  len(out), singles, conflicts, rejected_total)
     return out
+
+
+def _as_date(value):
+    from datetime import date, datetime
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if hasattr(value, 'date'):
+        return value.date()
+    if isinstance(value, str):
+        return datetime.strptime(value[:10], '%Y-%m-%d').date()
+    return value
 
 
 def latest_marks(marks):

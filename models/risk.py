@@ -142,20 +142,30 @@ def key_rate_durations(flows, settle, curve, key_tenors=(0.5, 2, 5, 10, 30),
     tenors = sorted(key_tenors)
     out = {}
     for i, kt in enumerate(tenors):
-        lo = tenors[i - 1] if i > 0 else 0.0
-        hi = tenors[i + 1] if i < len(tenors) - 1 else tenors[-1] * 2
+        first, last = i == 0, i == len(tenors) - 1
+        lo = None if first else tenors[i - 1]
+        hi = None if last else tenors[i + 1]
 
-        def shocked(sign):
+        # The end tenors carry a FLAT shoulder outward: everything shorter
+        # than the first key tenor moves fully with it, everything beyond the
+        # last with the last. Tapering to zero at t=0 and at 2x the last tenor
+        # left part of the curve unshocked, so the KRDs no longer summed to
+        # the spread duration.
+        def shocked(sign, kt=kt, lo=lo, hi=hi):
             def zero_fn(t):
                 z = curve.zero(t)
                 if z is None:
                     return None
-                if t <= lo or t >= hi:
-                    weight = 0.0
-                elif t <= kt:
-                    weight = (t - lo) / (kt - lo) if kt > lo else 1.0
+                if t <= kt:
+                    if lo is None:
+                        weight = 1.0
+                    else:
+                        weight = max(0.0, (t - lo) / (kt - lo))
                 else:
-                    weight = (hi - t) / (hi - kt) if hi > kt else 1.0
+                    if hi is None:
+                        weight = 1.0
+                    else:
+                        weight = max(0.0, (hi - t) / (hi - kt))
                 return z + sign * bump * weight
             return zero_fn
 

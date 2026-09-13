@@ -190,3 +190,18 @@ def test_risk_measures_return_none_on_empty_flows():
     assert dv01(None, 5.0) is None
     assert dv01(100.0, None) is None
     assert price_change_estimate(None, None, 0.01) is None
+
+
+def test_key_rate_durations_sum_to_spread_duration_at_both_ends(sample_par_curve):
+    from datetime import date
+
+    from models.curve import YieldCurve
+    from models.risk import key_rate_durations, spread_duration
+    from models.schedule import cashflows
+    curve = YieldCurve.from_par_dict(date(2026, 8, 6), sample_par_curve)
+    settle = date(2026, 8, 6)
+    for maturity in (date(2027, 5, 6), date(2056, 8, 15)):   # 0.75y and 30y+
+        flows = cashflows(100, 0.05, maturity, 2, settle=settle)
+        total = sum(key_rate_durations(flows, settle, curve).values())
+        assert total == pytest.approx(spread_duration(flows, settle, 0.0, curve),
+                                      abs=1e-4)

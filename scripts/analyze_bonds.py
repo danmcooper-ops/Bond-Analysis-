@@ -44,7 +44,7 @@ from data.logging_setup import get_logger
 from data.mspd_client import MSPDClient
 from data.treasury_curve_client import TreasuryCurveClient
 from data.treasury_direct_client import TreasuryDirectClient
-from models.bond_types import from_row
+from models.bond_types import MAX_COUPON, from_row
 from models import credit, discount
 from models.curve import YieldCurve
 from models.pricing import (bond_flows_and_stub, current_yield,
@@ -249,7 +249,12 @@ def load_corporate_universe(quarter):
     # every `is None` guard downstream. Coerced at the boundary so the rest of
     # the pipeline sees one representation of "absent".
     rows = frame.astype(object).where(pd.notna(frame), None).to_dict('records')
+    # Universes built before coupon_rate became decimal-only carry it in
+    # percent. Drop it so from_row reads annualized_rate, whose unit is known.
+    legacy_coupon = any((r.get('coupon_rate') or 0) > MAX_COUPON for r in rows)
     for row in rows:
+        if legacy_coupon:
+            row['coupon_rate'] = None
         for field in ('maturity_date', 'report_date', 'mark_date'):
             value = row.get(field)
             if value is not None and hasattr(value, 'date'):
@@ -449,14 +454,13 @@ def _price_with_overlay(row, bond, ctx, settle, flows, accrued):
                     row['_mark_drift_flag'] = drift > 3.0
                     return clean, dirty
 
-    # The mark cannot be aged (no curve for that date, or the spread would not
-    # solve). Falling back to the raw mark would reintroduce the stale-price
-    # bug, so use the curve and keep the mark as reference only.
-    dirty = price_from_zero_curve(flows, settle, curve, spread=0.0)
-    if dirty is None:
-        return None, None
-    row['price_source'] = 'curve_implied_mark_unusable'
-    return dirty - accrued, dirty
+    # The mark cannot be aged. Repricing off the curve at ZERO spread — what
+    # this used to do — turned a distressed bond marked at 33 into a 100.8
+    # "estimate", i.e. priced PDVSA as a Treasury. The raw mark is stale but at
+    # least describes this bond; use it, flag it, and let the cap demote it.
+    row['_spread_unsolved'] = True
+    row['price_source'] = 'raw_mark_spread_unsolved'
+    return marked, marked + accrued
 
 
 def _analyze_discount(row, bond, ctx, settle):

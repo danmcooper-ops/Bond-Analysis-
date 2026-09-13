@@ -35,9 +35,10 @@ TREASURY_CUSIP_PREFIXES = {
     '912828': 'TREASURY',        # notes
     '91282C': 'TREASURY',        # notes (current series)
     '912796': 'TREASURY_BILL',   # bills
+    '912797': 'TREASURY_BILL',   # bills (current series)
+    '912833': 'TREASURY',        # STRIPS (interest)
     '912820': 'TREASURY',        # STRIPS
     '912803': 'TREASURY',        # STRIPS principal
-    '9128 ': 'TREASURY',         # defensive: malformed feed rows
 }
 
 AGENCY_CUSIP_PREFIX_ROOTS = ('3133', '3134', '3135', '3136', '3137')

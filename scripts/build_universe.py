@@ -194,7 +194,10 @@ def build(quarter, as_of, min_funds, min_held, audit=0):
         row['mark_lag_days'] = (fundamentals_asof - report_date).days
         row['years_to_maturity'] = years
         row['asset_class'] = 'CORP_IG'      # refined by the credit model at M6
-        row['coupon_rate'] = mark.get('annualized_rate')
+        # annualized_rate stays percent (N-PORT's field); coupon_rate is
+        # always a decimal. One conversion, here, at the boundary.
+        rate = mark.get('annualized_rate')
+        row['coupon_rate'] = rate / 100.0 if rate is not None else None
 
         resolution = resolutions.get(mark['cusip'][:6].upper(), {})
         fundamentals.attach(row, resolution, report_date)

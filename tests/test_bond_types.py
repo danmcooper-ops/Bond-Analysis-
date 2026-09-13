@@ -42,12 +42,23 @@ def test_builds_a_bond_from_a_well_formed_row():
     assert bond.convention == D30_360
 
 
-def test_percentage_coupons_are_normalised_to_decimals():
-    """N-PORT reports 5.0 for a 5% coupon; other sources use 0.05. A feed that
-    switches units silently is far more likely than a real 100%+ coupon."""
+def test_coupon_unit_comes_from_the_field_not_the_value():
+    """annualized_rate is N-PORT's percent field; coupon_rate is decimal.
+    Guessing from the value read 0.875% as 87.5% and dropped the bond."""
     assert from_row(_row(annualized_rate=5.0), SETTLE)[0].coupon_rate == pytest.approx(0.05)
-    assert from_row(_row(annualized_rate=0.05), SETTLE)[0].coupon_rate == pytest.approx(0.05)
     assert from_row(_row(annualized_rate=12.5), SETTLE)[0].coupon_rate == pytest.approx(0.125)
+    assert from_row(_row(coupon_rate=0.05), SETTLE)[0].coupon_rate == pytest.approx(0.05)
+
+
+@pytest.mark.parametrize('pct', [0.25, 0.5, 0.625, 0.875, 1.0])
+def test_sub_one_percent_coupons_survive(pct):
+    bond, reason = from_row(_row(annualized_rate=pct), SETTLE)
+    assert reason is None
+    assert bond.coupon_rate == pytest.approx(pct / 100)
+
+
+def test_a_percent_value_in_the_decimal_field_is_rejected_not_rescaled():
+    assert from_row(_row(coupon_rate=25.0), SETTLE)[0] is None
 
 
 def test_explicit_coupon_rate_wins_over_annualized_rate():
@@ -233,3 +244,23 @@ def test_bond_years_to_maturity():
                 maturity=date(2036, 8, 6), frequency=2, convention=D30_360,
                 comp='semiannual', asset_class='CORP_IG')
     assert bond.years_to_maturity(date(2026, 8, 6)) == pytest.approx(10.0, abs=0.01)
+
+
+# --- seniority word boundaries ---------------------------------------------
+
+@pytest.mark.parametrize('title, rank', [
+    ('ACME SR UNSECURED NOTES', SENIORITY_SENIOR_UNSECURED),
+    ('ACME CORP UNSECURED NOTE 5% 2030', SENIORITY_SENIOR_UNSECURED),
+    ('ACME SR SECURED NOTES', 1),
+    ('ACME FIRST LIEN TERM NOTE', 1),
+])
+def test_unsecured_is_not_read_as_secured(title, rank):
+    assert infer_seniority(title) == (rank, 'title')
+
+
+@pytest.mark.parametrize('cusip, cls', [
+    ('912797LM7', 'TREASURY_BILL'),
+    ('912833LT5', 'TREASURY'),
+])
+def test_current_bill_and_strips_prefixes_classify(cusip, cls):
+    assert classify_by_cusip(cusip) == cls

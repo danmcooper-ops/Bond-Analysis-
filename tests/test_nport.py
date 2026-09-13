@@ -326,3 +326,61 @@ def test_fair_spread_prefers_the_bucket_specific_curve():
 def test_fair_spread_without_any_term_data_is_the_flat_index():
     from models.credit import fair_spread
     assert fair_spread('BBB', 10, {'BBB': 0.0096}) == pytest.approx(0.0096)
+
+
+# ---------------------------------------------------------------------------
+# Ambiguous low coupons: 0.25 is a 0.25% convertible or a 25% coupon
+# ---------------------------------------------------------------------------
+
+from data.nport_consensus import coupon_from_title, coupon_units_ambiguous
+
+
+@pytest.mark.parametrize('title, expected', [
+    ('EEFT 0 5/8 10/01/30', 0.625),
+    ('LABL 10.5 07/15/27 144A', 10.5),
+    ('REDFIN CORP CONV 0.5% 04/01/2027', 0.5),
+    ('ACME CORP SR NOTE 5.000% 06/15/35', 5.0),
+    ('Home Depot Inc/The', None),
+    (None, None),
+])
+def test_coupon_from_title(title, expected):
+    assert coupon_from_title(title) == expected
+
+
+def test_a_convertible_quarter_percent_is_not_inflated_to_25_percent():
+    # JD.com 0.25% note: previously priced as a 25% coupon, 2,005bp Z-spread.
+    ctx = {'is_convertible': True, 'price': 99.8, 'years': 1.6}
+    assert normalise_coupon_units([0.25], ctx) == pytest.approx([0.25])
+
+
+def test_price_decides_when_the_title_is_silent():
+    # A 0.25% note at a discount yields ~1.6%; as 25% it would yield ~27%.
+    ctx = {'price': 96.0, 'years': 3.0}
+    assert normalise_coupon_units([0.25, 0.25], ctx) == pytest.approx([0.25, 0.25])
+    assert not coupon_units_ambiguous([0.25], ctx)
+    # A 12.5% coupon trading at 100 with 3y left: the fraction reading fits.
+    ctx = {'price': 100.0, 'years': 3.0}
+    assert normalise_coupon_units([0.125], ctx) == pytest.approx([12.5])
+
+
+def test_title_beats_price():
+    ctx = {'title_of_issue': 'XYZ 12.5 01/15/29', 'price': 101.0, 'years': 2.5}
+    assert normalise_coupon_units([0.125], ctx) == pytest.approx([12.5])
+
+
+def test_a_fraction_sibling_pins_the_mid_value_as_percent():
+    assert normalise_coupon_units([0.125, 0.00125]) == pytest.approx([0.125, 0.125])
+
+
+def test_no_evidence_is_flagged_ambiguous():
+    assert coupon_units_ambiguous([0.25], {})
+    assert normalise_coupon_units([0.25], {}) == pytest.approx([0.25])
+
+
+def test_consensus_carries_the_ambiguity_flag(sample_nport_rows):
+    from datetime import date
+    rows = [{**r, 'annualized_rate': 0.3, 'title_of_issue': 'ACME CORP',
+             'report_date': date(2026, 4, 30), 'implied_price': 98.5}
+            for r in sample_nport_rows[:3]]
+    mark = consensus_mark(rows)[0]
+    assert '_coupon_unit_ambiguous' in mark

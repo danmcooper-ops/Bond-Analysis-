@@ -73,6 +73,26 @@ def coupon_dates(maturity, frequency=2, settle=None, dated_date=None,
     return dates
 
 
+def _notional_period(settle, maturity, frequency=2, dated_date=None, eom=None):
+    """(accrual_start, notional_start, next_coupon) for the period holding settle.
+
+    notional_start is where a REGULAR period would begin. It differs from
+    accrual_start only in a short first period (dated date mid-period), and
+    that difference matters: ACT/ACT divides by the regular period's length,
+    and the stub factor w is measured against it. Using the dated date for
+    both overstated accrued interest by ~50% on such a bond.
+    """
+    prev, nxt = previous_next_coupon(settle, maturity, frequency, eom=eom)
+    start = prev
+    if dated_date is not None and prev < dated_date:
+        start = dated_date
+    return start, prev, nxt
+
+
+def _resolved_eom(maturity, eom):
+    return infer_eom(maturity) if eom is None else bool(eom)
+
+
 def previous_next_coupon(settle, maturity, frequency=2, dated_date=None,
                          eom=None):
     """Return (previous_coupon_date, next_coupon_date) bracketing `settle`.
@@ -101,7 +121,7 @@ def previous_next_coupon(settle, maturity, frequency=2, dated_date=None,
 
 
 def cashflows(face, coupon_rate, maturity, frequency=2, settle=None,
-              dated_date=None, eom=None):
+              dated_date=None, eom=None, convention=D30_360):
     """Remaining cashflows as [(date, amount), ...], strictly after `settle`.
 
     A coupon falling exactly on the settlement date belongs to the seller and
@@ -124,6 +144,21 @@ def cashflows(face, coupon_rate, maturity, frequency=2, settle=None,
 
     cpn = float(face) * float(coupon_rate) / frequency
     flows = [(d, cpn) for d in dates]
+
+    # A short first period pays only the coupon accrued since the dated date.
+    if dated_date is not None:
+        step = 12 // frequency
+        first = flows[0][0]
+        k = round(((first.year - maturity.year) * 12
+                   + first.month - maturity.month) / -step) + 1
+        notional_start = add_months(maturity, -step * k,
+                                    eom=_resolved_eom(maturity, eom))
+        if notional_start < dated_date < first:
+            frac = accrual_fraction(dated_date, first, first, convention,
+                                    frequency=frequency,
+                                    eom=_resolved_eom(maturity, eom),
+                                    notional_start=notional_start)
+            flows[0] = (first, cpn * frac)
     # Redemption rides along with the final coupon.
     flows[-1] = (flows[-1][0], flows[-1][1] + float(face))
     return flows
@@ -138,9 +173,11 @@ def accrued_interest(settle, coupon_rate, maturity, frequency=2, face=100.0,
     """
     if not frequency or not coupon_rate:
         return 0.0
-    prev, nxt = previous_next_coupon(settle, maturity, frequency,
-                                     dated_date=dated_date, eom=eom)
-    frac = accrual_fraction(prev, settle, nxt, convention, frequency=frequency)
+    start, notional, nxt = _notional_period(settle, maturity, frequency,
+                                            dated_date=dated_date, eom=eom)
+    frac = accrual_fraction(start, settle, nxt, convention, frequency=frequency,
+                            eom=_resolved_eom(maturity, eom),
+                            notional_start=notional)
     return float(face) * float(coupon_rate) / frequency * frac
 
 
@@ -154,10 +191,13 @@ def stub_factor(settle, maturity, frequency=2, convention=D30_360,
     """
     if not frequency:
         return 1.0
-    prev, nxt = previous_next_coupon(settle, maturity, frequency,
-                                     dated_date=dated_date, eom=eom)
-    return 1.0 - accrual_fraction(prev, settle, nxt, convention,
-                                 frequency=frequency)
+    _, notional, nxt = _notional_period(settle, maturity, frequency,
+                                        dated_date=dated_date, eom=eom)
+    # Measured from the notional start: w is the share of a REGULAR period
+    # still to run, which is what the (1 + y/m)^(w + k - 1) formula assumes.
+    return 1.0 - accrual_fraction(notional, settle, nxt, convention,
+                                 frequency=frequency,
+                                 eom=_resolved_eom(maturity, eom))
 
 
 def dirty_price(clean, accrued):

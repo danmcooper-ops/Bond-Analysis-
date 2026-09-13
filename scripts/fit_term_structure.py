@@ -162,7 +162,7 @@ def collect_spreads(min_funds=5):
         curve = YieldCurve.from_par_dict(curve_date, par)
 
         for record in panel[panel['month'] == month].to_dict('records'):
-            row = {**record, 'coupon_rate': record.get('annualized_rate')}
+            row = {**record, 'coupon_rate': None}     # use annualized_rate (%)
             maturity = row.get('maturity_date')
             if maturity is not None and hasattr(maturity, 'date'):
                 row['maturity_date'] = maturity.date()

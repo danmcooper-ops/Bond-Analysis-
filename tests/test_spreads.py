@@ -172,3 +172,18 @@ def test_wedge_skips_months_with_missing_values():
     fred = {'A': {'m1': 0.010, 'm2': 0.011, 'm3': 0.011}}
     out = fit_z_oas_wedge(model_z, fred)
     assert out['A']['n_months'] == 2
+
+
+def test_z_spread_solves_for_distressed_paper(sample_par_curve):
+    from datetime import date
+
+    from models.curve import YieldCurve
+    from models.schedule import cashflows
+    settle = date(2026, 8, 6)
+    curve = YieldCurve.from_par_dict(settle, sample_par_curve)
+    flows = cashflows(100, 0.085, date(2035, 10, 27), 2, settle=settle)
+    # Marked at 33: well past the old 50% bracket.
+    z = z_spread(33.5, flows, settle, curve)
+    assert z is not None and z > 0.20
+    assert price_from_zero_curve(flows, settle, curve, spread=z) == \
+        pytest.approx(33.5, abs=1e-6)

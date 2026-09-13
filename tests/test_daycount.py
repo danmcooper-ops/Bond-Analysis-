@@ -137,3 +137,35 @@ def test_accrual_fraction_is_clamped():
 def test_accrual_fraction_on_a_degenerate_period():
     d = date(2026, 6, 15)
     assert accrual_fraction(d, d, d, D30_360) == 0.0
+
+
+# --- short first period and the 30/360 EOM flag -----------------------------
+
+def test_short_first_period_act_act_uses_the_notional_period():
+    from models.schedule import accrued_interest, cashflows, stub_factor
+    maturity, settle, dated = date(2036, 12, 15), date(2026, 9, 14), date(2026, 8, 15)
+    # 30 days accrued over a 183-day REGULAR period, not the 122-day stub.
+    assert accrued_interest(settle, 0.06, maturity, 2, 100, ACT_ACT,
+                            dated_date=dated) == pytest.approx(3.0 * 30 / 183)
+    assert stub_factor(settle, maturity, 2, ACT_ACT, dated_date=dated) == \
+        pytest.approx(92 / 183)
+    first = cashflows(100, 0.06, maturity, 2, settle=settle, dated_date=dated,
+                      convention=ACT_ACT)[0]
+    assert first == (date(2026, 12, 15), pytest.approx(3.0 * 122 / 183))
+
+
+def test_regular_period_is_unchanged_by_a_dated_date_on_a_coupon_date():
+    from models.schedule import accrued_interest
+    maturity, settle = date(2034, 11, 15), date(2026, 7, 15)
+    with_dated = accrued_interest(settle, 0.0425, maturity, 2, 100, ACT_ACT,
+                                  dated_date=date(2024, 11, 15))
+    without = accrued_interest(settle, 0.0425, maturity, 2, 100, ACT_ACT)
+    assert with_dated == pytest.approx(without)
+
+
+def test_30_360_accrual_respects_a_non_eom_schedule():
+    from models.schedule import accrued_interest
+    # Pays on the 28th: the Feb end-of-month rule must not apply. 12 days.
+    accrued = accrued_interest(date(2027, 3, 10), 0.06, date(2035, 8, 28), 2,
+                               100, D30_360)
+    assert accrued == pytest.approx(3.0 * 12 / 180)

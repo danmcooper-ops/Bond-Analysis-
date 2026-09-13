@@ -8,6 +8,7 @@ The reason for each rejection is recorded so the run can report *why* rows
 dropped out rather than just how many.
 """
 
+import re
 from dataclasses import dataclass, field
 from datetime import date, datetime
 
@@ -60,13 +61,17 @@ def _parse_date(value):
     return None
 
 
-def _parse_coupon(value):
+MAX_COUPON = 0.40
+
+
+def _parse_coupon(value, unit):
     """Return a decimal coupon rate, or None.
 
-    N-PORT reports ANNUALIZED_RATE as a percentage (5.0 for a 5% coupon), but
-    other sources use decimals. Anything above 1.0 is read as a percentage —
-    a genuine 100%+ coupon does not exist in this universe, whereas a feed
-    that switches units silently very much does.
+    The unit is decided by the FIELD, never guessed from the value:
+    `annualized_rate` is N-PORT's field and is percent once
+    nport_consensus has reconciled its mixed encodings; `coupon_rate` is
+    always a decimal. The old rule — "above 1.0 means percent" — read a
+    0.875% coupon (0.875) as 87.5% and dropped 61 of 62 sub-1% corporates.
     """
     if value is None or value == '':
         return None
@@ -76,9 +81,9 @@ def _parse_coupon(value):
         return None
     if rate != rate:                       # NaN
         return None
-    if abs(rate) > 1.0:
+    if unit == 'percent':
         rate = rate / 100.0
-    if rate < 0 or rate > 0.40:
+    if rate < 0 or rate > MAX_COUPON:
         return None
     return rate
 
@@ -100,9 +105,10 @@ def from_row(row, settle=None):
     if settle is not None and maturity <= settle:
         return None, 'already matured'
 
-    coupon = _parse_coupon(row.get('coupon_rate')
-                           if row.get('coupon_rate') is not None
-                           else row.get('annualized_rate'))
+    if row.get('coupon_rate') is not None:
+        coupon = _parse_coupon(row['coupon_rate'], 'decimal')
+    else:
+        coupon = _parse_coupon(row.get('annualized_rate'), 'percent')
     if coupon is None:
         return None, 'missing or implausible coupon'
 
@@ -151,15 +157,25 @@ def from_row(row, settle=None):
     ), None
 
 
+def _words(*phrases):
+    # Word boundaries, so 'SECURED' cannot match inside 'UNSECURED' — a plain
+    # substring test ranked every "SR UNSECURED NOTES" title senior secured,
+    # and tagged it source='title' so it looked like real data.
+    return tuple(re.compile(r'\b' + re.escape(p) + r'\b') for p in phrases)
+
+
 _SENIORITY_PATTERNS = (
-    # Ordered most-specific first: "SR SECURED" must beat the bare "SR".
-    (SENIORITY_JUNIOR, ('JR SUBORDINATED', 'JUNIOR SUBORDINATED', 'JR SUB',
-                        'HYBRID', 'PFD', 'PREFERRED', 'CAPITAL SECURITIES')),
-    (SENIORITY_SENIOR_SUB, ('SENIOR SUBORDINATED', 'SR SUBORDINATED', 'SR SUB')),
-    (SENIORITY_SUB, ('SUBORDINATED', 'SUB NOTE', 'SUB DEB')),
-    (SENIORITY_SENIOR_SECURED, ('1ST LIEN', 'FIRST LIEN', '2ND LIEN',
-                                'SECOND LIEN', 'SR SECURED', 'SENIOR SECURED',
-                                'SECURED')),
+    # Ordered most-specific first: "SR SECURED" must beat the bare "SR", and
+    # an explicit UNSECURED must beat the secured group.
+    (SENIORITY_JUNIOR, _words('JR SUBORDINATED', 'JUNIOR SUBORDINATED', 'JR SUB',
+                              'HYBRID', 'PFD', 'PREFERRED', 'CAPITAL SECURITIES')),
+    (SENIORITY_SENIOR_SUB, _words('SENIOR SUBORDINATED', 'SR SUBORDINATED',
+                                  'SR SUB')),
+    (SENIORITY_SUB, _words('SUBORDINATED', 'SUB NOTE', 'SUB DEB')),
+    (SENIORITY_SENIOR_UNSECURED, _words('UNSECURED')),
+    (SENIORITY_SENIOR_SECURED, _words('1ST LIEN', 'FIRST LIEN', '2ND LIEN',
+                                      'SECOND LIEN', 'SR SECURED',
+                                      'SENIOR SECURED', 'SECURED')),
 )
 
 
@@ -175,7 +191,7 @@ def infer_seniority(title_of_issue, payoff_profile=None, issuer_cat=None):
     text = (title_of_issue or '').upper()
     if text:
         for rank, patterns in _SENIORITY_PATTERNS:
-            if any(p in text for p in patterns):
+            if any(p.search(text) for p in patterns):
                 return rank, 'title'
         if 'SR ' in text or 'SENIOR' in text:
             return SENIORITY_SENIOR_UNSECURED, 'title'

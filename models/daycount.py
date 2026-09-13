@@ -116,17 +116,22 @@ def day_count(start, end, convention, eom=True):
 
 
 def accrual_fraction(period_start, settle, period_end, convention,
-                     frequency=2, eom=True):
+                     frequency=2, eom=True, notional_start=None):
     """Fraction of the current coupon period that has accrued, in [0, 1].
 
     Defined once here so accrued interest, the pricing formula's stub factor
     w = 1 - accrual_fraction, and duration all agree by construction. A
     mismatch between those three is the classic source of a bond model that
     is nearly right.
+
+    `notional_start` is where a regular period would have begun, for a short
+    first period whose accrual starts at the dated date: ACT/ACT then counts
+    days from `period_start` but divides by the regular period's length.
     """
     if period_end <= period_start:
         return 0.0
+    denominator_start = notional_start or period_start
     frac = year_fraction(period_start, settle, convention,
-                         period_start=period_start, period_end=period_end,
+                         period_start=denominator_start, period_end=period_end,
                          frequency=frequency, eom=eom) * frequency
     return max(0.0, min(1.0, frac))
