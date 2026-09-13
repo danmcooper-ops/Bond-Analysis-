@@ -788,11 +788,22 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('snapshot', nargs='?', default=None,
                     help='results_*.parquet (default: the newest)')
+    ap.add_argument('--run-date', default=None, metavar='YYYY-MM-DD',
+                    help='render exactly this run; fail if its artifacts are '
+                         'missing rather than falling back to the newest')
     ap.add_argument('-o', '--out', default=None)
     ap.add_argument('--open', action='store_true', help='open it afterwards')
     args = ap.parse_args()
 
     path = args.snapshot
+    if path is None and args.run_date:
+        # The scheduled run passes its own date. Falling back to the newest
+        # snapshot here is how a failed 09-04 analysis re-rendered and
+        # re-published the 09-03 report as if it were fresh.
+        path = os.path.join(OUTPUT_DIR, f'results_{args.run_date}.parquet')
+        if not os.path.exists(path):
+            raise SystemExit(f'[fatal] {path} not found — the analysis for '
+                             f'{args.run_date} did not complete')
     if path is None:
         import glob
         candidates = sorted(glob.glob(os.path.join(OUTPUT_DIR,
@@ -803,7 +814,12 @@ def main():
 
     stamp = os.path.basename(path)[8:18]
     rows = load_rows(path)
-    meta = load_json(f'run_meta_{stamp}.json') or {}
+    meta = load_json(f'run_meta_{stamp}.json')
+    if meta is None:
+        # run_meta is written last, so its absence means the run did not
+        # finish; rendering without it would publish a page with no curve.
+        raise SystemExit(f'[fatal] run_meta_{stamp}.json missing or unreadable '
+                         f'— the analysis for {stamp} did not complete')
     term = load_json('term_structure.json')
 
     out = args.out or os.path.join(OUTPUT_DIR, f'bond_analysis_{stamp}.html')

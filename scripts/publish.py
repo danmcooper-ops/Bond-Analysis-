@@ -24,6 +24,7 @@ stashing, no risk of publishing a half-finished edit.
 
 import argparse
 import glob
+from datetime import date
 import os
 import shutil
 import subprocess
@@ -39,6 +40,11 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUTPUT_DIR = os.path.join(REPO_ROOT, 'output')
 BRANCH = 'pages-live'
 WORKTREE = os.path.join(REPO_ROOT, '.pages-live')
+
+# Exit status when the staged report matches what is already published. Kept
+# distinct from 0 so a caller does not go looking for a deploy that was never
+# triggered.
+EXIT_UNCHANGED = 3
 
 
 def git(*args, cwd=REPO_ROOT, check=True, quiet=False):
@@ -165,12 +171,27 @@ def main():
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--report', default=None)
+    ap.add_argument('--run-date', default=None, metavar='YYYY-MM-DD',
+                    help='publish exactly this run; fail if its report is '
+                         'missing rather than publishing an older one')
     ap.add_argument('--dry-run', action='store_true')
     ap.add_argument('--keep-worktree', action='store_true')
     args = ap.parse_args()
 
-    report = args.report or newest_report()
+    if args.report:
+        report = args.report
+    elif args.run_date:
+        report = os.path.join(OUTPUT_DIR, f'bond_analysis_{args.run_date}.html')
+        if not os.path.exists(report):
+            raise SystemExit(f'[fatal] {report} not found — nothing rendered '
+                             f'for {args.run_date}; refusing to publish an '
+                             f'older report in its place')
+    else:
+        report = newest_report()
     stamp = os.path.basename(report)[14:24]
+    if not args.run_date and stamp != date.today().isoformat():
+        log.warning('Publishing the %s report, which is not today\'s (%s)',
+                    stamp, date.today().isoformat())
 
     ensure_worktree()
     try:
@@ -184,7 +205,9 @@ def main():
         if not args.keep_worktree:
             git('worktree', 'remove', '--force', WORKTREE, check=False)
 
-    if published and not args.dry_run:
+    if not published:
+        return EXIT_UNCHANGED
+    if not args.dry_run:
         print(f'\n  Published {stamp}. Pages will rebuild in a minute or two.')
         print('  Check the run: gh run list --workflow=deploy-pages.yml\n')
     return 0

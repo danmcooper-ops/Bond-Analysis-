@@ -212,6 +212,16 @@ def attach_nport_marks(rows, as_of, quarter=None):
     return matched
 
 
+def newest_universe_quarter():
+    """Quarter of the newest output/universe_<quarter>.parquet."""
+    import glob
+    paths = sorted(glob.glob(os.path.join(OUTPUT_DIR, 'universe_*.parquet')))
+    if not paths:
+        raise SystemExit('[fatal] no output/universe_*.parquet — run '
+                         'scripts/build_universe.py first')
+    return os.path.basename(paths[-1])[len('universe_'):-len('.parquet')]
+
+
 def load_corporate_universe(quarter):
     """Read the universe built by scripts/build_universe.py."""
     path = os.path.join(OUTPUT_DIR, f'universe_{quarter}.parquet')
@@ -765,23 +775,32 @@ def write_snapshot(rows, ctx, settle, as_json=False):
         'par_curve': ctx['par'],
     }
     meta_path = os.path.join(OUTPUT_DIR, f'run_meta_{stamp}.json')
-    with open(meta_path, 'w', encoding='utf-8') as fh:
-        json.dump(meta, fh, indent=2, default=str)
 
     # The regime dict is per-run context, not per-row data; it would bloat
     # every row and does not belong in a columnar store.
     flat = [{k: v for k, v in r.items() if k != '_curve_regime'} for r in rows]
 
+    # Both files go down via temp file + rename, and run_meta goes LAST: its
+    # presence is what tells report_html the run completed. A run killed
+    # mid-write used to leave a truncated parquet under the real name.
     if as_json:
         path = os.path.join(OUTPUT_DIR, f'results_{stamp}.json')
-        with open(path, 'w', encoding='utf-8') as fh:
+        tmp = path + '.tmp'
+        with open(tmp, 'w', encoding='utf-8') as fh:
             json.dump({'meta': meta, 'results': flat}, fh, default=str)
     else:
         import pandas as pd
         path = os.path.join(OUTPUT_DIR, f'results_{stamp}.parquet')
+        tmp = path + '.tmp'
         pd.DataFrame(flat).astype(
             {c: 'object' for c in ('cusip', 'rating') if c in flat[0]}
-        ).to_parquet(path, index=False)
+        ).to_parquet(tmp, index=False)
+    os.replace(tmp, path)
+
+    tmp = meta_path + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as fh:
+        json.dump(meta, fh, indent=2, default=str)
+    os.replace(tmp, meta_path)
 
     size_mb = os.path.getsize(path) / 1e6
     log.info('Wrote %s (%.2f MB) and %s', os.path.basename(path), size_mb,
@@ -795,10 +814,13 @@ def main():
     ap = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('--universe', default='treasury',
+    # 'all' is the default because the daily snapshot is the corpus: a
+    # Treasury-only default once overwrote a day's snapshot with 402 rows.
+    ap.add_argument('--universe', default='all',
                     choices=['treasury', 'corporate', 'all'])
-    ap.add_argument('--quarter', default='2026q2',
-                    help='N-PORT quarter backing the corporate universe')
+    ap.add_argument('--quarter', default=None,
+                    help='N-PORT quarter backing the corporate universe '
+                         '(default: the newest output/universe_*.parquet)')
     ap.add_argument('--as-of', type=lambda s: datetime.strptime(s, '%Y-%m-%d').date(),
                     default=None)
     ap.add_argument('--max-years', type=int, default=31)
@@ -815,6 +837,10 @@ def main():
     args = ap.parse_args()
 
     settle = args.as_of or date.today()
+    # Stamp the log with the run-START date, so a run crossing midnight keeps
+    # one log file.
+    from data.logging_setup import configure
+    configure(run_date=settle)
     params = default_params()
     errors = validate_params(params)
     if errors:
@@ -828,7 +854,7 @@ def main():
     if args.universe in ('treasury', 'all'):
         raw += load_treasury_universe(settle, max_years=args.max_years)
     if args.universe in ('corporate', 'all'):
-        raw += load_corporate_universe(args.quarter)
+        raw += load_corporate_universe(args.quarter or newest_universe_quarter())
     log.info('  %d reference rows', len(raw))
 
     if not args.no_marks:
