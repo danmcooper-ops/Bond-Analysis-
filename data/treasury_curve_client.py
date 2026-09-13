@@ -119,6 +119,16 @@ def _parse_csv(text):
     return out
 
 
+YEAR_END_GRACE_DAYS = 15
+
+
+def _year_still_open(year, today):
+    if year >= today.year:
+        return True
+    return (year == today.year - 1
+            and (today - date(today.year, 1, 1)).days < YEAR_END_GRACE_DAYS)
+
+
 class TreasuryCurveClient:
     """Fetches and caches daily par yield curves, one JSON file per year."""
 
@@ -138,8 +148,11 @@ class TreasuryCurveClient:
         path = self._cache_path(year)
         if not os.path.exists(path):
             return None
-        # The current year goes stale daily; closed years never change.
-        if year == date.today().year:
+        # The current year goes stale daily; closed years never change. But a
+        # year is not closed on Jan 1: the daily run fires before that day's
+        # curve is published, so the Dec 31 curve lands AFTER the year rolls.
+        # Treating last year as closed from Jan 1 lost Dec 31 permanently.
+        if _year_still_open(year, date.today()):
             age_days = (date.today() - date.fromtimestamp(
                 os.path.getmtime(path))).days
             if age_days >= self.max_age_days:
@@ -257,8 +270,12 @@ class TreasuryCurveClient:
         def y(tenor):
             return curve.get(tenor)
 
-        slope_10y_3m = (y('10Y') - y('3M')) if y('10Y') and y('3M') else None
-        slope_10y_2y = (y('10Y') - y('2Y')) if y('10Y') and y('2Y') else None
+        # `is not None`, not truthiness: a 0.00% bill yield (2020-21) is data.
+        def both(a, b):
+            return y(a) is not None and y(b) is not None
+
+        slope_10y_3m = (y('10Y') - y('3M')) if both('10Y', '3M') else None
+        slope_10y_2y = (y('10Y') - y('2Y')) if both('10Y', '2Y') else None
         level_10y = y('10Y')
 
         start = date(curve_date.year - 1, curve_date.month, curve_date.day) \
@@ -266,7 +283,8 @@ class TreasuryCurveClient:
             else date(curve_date.year - 1, 2, 28)
         history = self.fetch_curve_history(start, curve_date)
 
-        tens = sorted(c['10Y'] for c in history.values() if c.get('10Y'))
+        tens = sorted(c['10Y'] for c in history.values()
+                      if c.get('10Y') is not None)
         level_pctile = None
         if len(tens) >= 30 and level_10y is not None:
             below = sum(1 for v in tens if v <= level_10y)
@@ -275,7 +293,7 @@ class TreasuryCurveClient:
         momentum_3m = None
         cutoff = date.fromordinal(curve_date.toordinal() - 91)
         earlier = [(d, c['10Y']) for d, c in history.items()
-                   if c.get('10Y') and d <= cutoff]
+                   if c.get('10Y') is not None and d <= cutoff]
         if earlier and level_10y is not None:
             momentum_3m = level_10y - max(earlier)[1]
 
@@ -294,10 +312,13 @@ class TreasuryCurveClient:
         # distinguish them.
         direction = 'unknown'
         if momentum_3m is not None and slope_10y_3m is not None:
-            prior_slopes = [c['10Y'] - c['3M'] for d, c in history.items()
-                            if c.get('10Y') and c.get('3M') and d <= cutoff]
+            # The slope three months ago — the same point momentum_3m compares
+            # against — not the average of every older slope in the window.
+            prior_slopes = [(d, c['10Y'] - c['3M']) for d, c in history.items()
+                            if c.get('10Y') is not None
+                            and c.get('3M') is not None and d <= cutoff]
             if prior_slopes:
-                d_slope = slope_10y_3m - (sum(prior_slopes) / len(prior_slopes))
+                d_slope = slope_10y_3m - max(prior_slopes)[1]
                 falling = momentum_3m < 0
                 steepening = d_slope > 0
                 direction = (('bull_' if falling else 'bear_')

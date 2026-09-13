@@ -59,6 +59,7 @@ ZIP_URL = ('https://www.sec.gov/files/dera/data/form-n-port-data-sets/'
 HOLDINGS_TABLE = 'FUND_REPORTED_HOLDING.tsv'
 DEBT_TABLE = 'DEBT_SECURITY.tsv'
 SUBMISSION_TABLE = 'SUBMISSION.tsv'
+FUND_INFO_TABLE = 'FUND_REPORTED_INFO.tsv'
 
 # Holdings with no CUSIP use a sentinel rather than leaving the field blank,
 # and there is more than one. '999999999' is documented; '000000000' is not,
@@ -122,8 +123,28 @@ REQUIRED_COLUMNS = {
                  'ANNUALIZED_RATE', 'IS_DEFAULT', 'ARE_ANY_INTEREST_PAYMENT',
                  'IS_ANY_PORTION_INTEREST_PAID'),
     SUBMISSION_TABLE: ('ACCESSION_NUMBER', 'SUB_TYPE', 'REPORT_DATE',
-                       'REPORT_ENDING_PERIOD'),
+                       'REPORT_ENDING_PERIOD', 'FILING_DATE'),
+    FUND_INFO_TABLE: ('ACCESSION_NUMBER', 'SERIES_ID'),
 }
+
+
+def latest_filings(submissions, series_by_accession):
+    """{accession: report_date}, keeping one filing per (series, month).
+
+    The latest FILING_DATE wins, with an amendment beating an original filed
+    the same day. A filing with no series id cannot be matched to anything,
+    so it stands alone.
+    """
+    best = {}
+    for sub in submissions:
+        series = series_by_accession.get(sub['accession']) or sub['accession']
+        key = (series, sub['report_date'])
+        rank = (sub.get('filing_date') or date.min,
+                sub.get('sub_type', '').endswith('/A'),
+                sub['accession'])
+        if key not in best or rank > best[key][0]:
+            best[key] = (rank, sub)
+    return {sub['accession']: sub['report_date'] for _, sub in best.values()}
 
 
 def parse_sec_date(text):
@@ -266,13 +287,30 @@ class NPORTClient:
     # -- assembly -----------------------------------------------------------
 
     def report_dates(self, quarter):
-        """{accession: report_date}. REPORT_DATE, not REPORT_ENDING_PERIOD."""
-        out = {}
+        """{accession: report_date} for the filings that count.
+
+        REPORT_DATE, not REPORT_ENDING_PERIOD. Amendments supersede: an
+        NPORT-P/A for the same series and month replaces the original, which
+        otherwise stays in the dataset and double-counts every holding in it
+        (1,065 duplicated debt holdings in 2026q2, inflating n_funds and
+        total_held_usd).
+        """
+        submissions = []
         for row in self.iter_table(quarter, SUBMISSION_TABLE):
             when = parse_sec_date(row.get('REPORT_DATE'))
             if when:
-                out[row['ACCESSION_NUMBER']] = when
-        log.info('%s: %d submissions', quarter, len(out))
+                submissions.append({
+                    'accession': row['ACCESSION_NUMBER'],
+                    'report_date': when,
+                    'filing_date': parse_sec_date(row.get('FILING_DATE')),
+                    'sub_type': (row.get('SUB_TYPE') or '').strip()})
+        series = {row['ACCESSION_NUMBER']: (row.get('SERIES_ID') or '').strip()
+                  for row in self.iter_table(quarter, FUND_INFO_TABLE,
+                                             columns=('ACCESSION_NUMBER',
+                                                      'SERIES_ID'))}
+        out = latest_filings(submissions, series)
+        log.info('%s: %d submissions, %d superseded by a later filing',
+                 quarter, len(submissions), len(submissions) - len(out))
         return out
 
     def build_holdings(self, quarter, issuer_types=TARGET_ISSUER_TYPES,

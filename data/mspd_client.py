@@ -33,6 +33,52 @@ NON_SECURITY_CLASSES = {'Total Marketable', 'Federal Financing Bank'}
 MILLIONS = 1e6
 
 
+def amounts_from_records(records):
+    """({cusip: dollars}, {source: count}) from MSPD table-3 records.
+
+    A reopened security has ONE row per tranche, and only one of those rows
+    carries outstanding_amt — the total. Taking the last row per CUSIP, as
+    this used to, usually kept a single tranche's issued_amt: 912828ZQ6 came
+    out at $29.4bn against a true $109.7bn, for 227 of 462 CUSIPs.
+
+    So: an outstanding_amt row always wins; failing that, tranches are summed
+    (issued net of redeemed where both are present).
+    """
+    outstanding, tranche_sum, tranche_source = {}, {}, {}
+    for rec in records:
+        if rec.get('security_class1_desc') in NON_SECURITY_CLASSES:
+            continue
+        cusip = str(rec.get('security_class2_desc') or '').strip().upper()
+        if len(cusip) != 9:
+            continue            # totals and subtotals carry a label here
+
+        total = _amount(rec.get('outstanding_amt'))
+        issued = _amount(rec.get('issued_amt'))
+        redeemed = _amount(rec.get('redeemed_amt'))
+
+        if total is not None:
+            outstanding[cusip] = max(total, outstanding.get(cusip, 0.0))
+        elif issued is not None:
+            net = issued + redeemed if redeemed is not None else issued
+            tranche_sum[cusip] = tranche_sum.get(cusip, 0.0) + net
+            if redeemed is None or tranche_source.get(cusip) == 'issued':
+                tranche_source[cusip] = 'issued'
+            else:
+                tranche_source.setdefault(cusip, 'issued_net')
+
+    amounts, sources = {}, {'outstanding': 0, 'issued_net': 0, 'issued': 0}
+    for cusip in set(outstanding) | set(tranche_sum):
+        if cusip in outstanding:
+            value, source = outstanding[cusip], 'outstanding'
+        else:
+            value, source = tranche_sum[cusip], tranche_source[cusip]
+        if value <= 0:
+            continue
+        amounts[cusip] = value * MILLIONS
+        sources[source] += 1
+    return amounts, sources
+
+
 def _amount(value):
     if value in (None, '', 'null'):
         return None
@@ -116,30 +162,7 @@ class MSPDClient:
             log.error('MSPD: no data for %s', record_date)
             return {}
 
-        amounts, sources = {}, {'outstanding': 0, 'issued_net': 0, 'issued': 0}
-        for rec in payload['data']:
-            if rec.get('security_class1_desc') in NON_SECURITY_CLASSES:
-                continue
-            cusip = str(rec.get('security_class2_desc') or '').strip().upper()
-            if len(cusip) != 9:
-                continue            # totals and subtotals carry a label here
-
-            outstanding = _amount(rec.get('outstanding_amt'))
-            issued = _amount(rec.get('issued_amt'))
-            redeemed = _amount(rec.get('redeemed_amt'))
-
-            if outstanding is not None:
-                value, source = outstanding, 'outstanding'
-            elif issued is not None and redeemed is not None:
-                value, source = issued + redeemed, 'issued_net'
-            elif issued is not None:
-                value, source = issued, 'issued'
-            else:
-                continue
-            if value <= 0:
-                continue
-            amounts[cusip] = value * MILLIONS
-            sources[source] += 1
+        amounts, sources = amounts_from_records(payload['data'])
 
         payload_out = {'record_date': record_date, 'amounts': amounts,
                        'sources': sources}

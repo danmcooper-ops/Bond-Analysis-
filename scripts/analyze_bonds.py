@@ -371,6 +371,11 @@ def apply_fair_value(row, ctx, params, flows, settle):
 def load_treasury_universe(as_of, max_years=31):
     td = TreasuryDirectClient()
     records = td.fetch_outstanding(as_of=as_of, max_years=max_years)
+    if td.failed_ranges:
+        # A failed year silently shrank the Treasury universe before; a
+        # partial snapshot must not become the day's corpus entry.
+        raise SystemExit('[fatal] TreasuryDirect failed for maturity ranges: '
+                         + ', '.join(f'{a}..{b}' for a, b in td.failed_ranges))
     rows = td.to_bond_rows(records, as_of=as_of)
 
     # Issue size comes from MSPD, not from TreasuryDirect's

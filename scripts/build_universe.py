@@ -24,6 +24,7 @@ matching when the real gap is coverage.
 import argparse
 import os
 import sys
+import time
 from collections import Counter, defaultdict
 from datetime import date, datetime
 
@@ -99,7 +100,11 @@ def load_sec_filers():
         os.path.abspath(__file__))), 'data', 'cache', 'sec')
     path = os.path.join(cache_dir, 'company_tickers.json')
     payload = None
-    if os.path.exists(path):
+    # The SEC filer list changes as companies list and delist; 30 days is
+    # fresh enough to diagnose coverage, and it used to never expire.
+    fresh = (os.path.exists(path)
+             and time.time() - os.path.getmtime(path) < 30 * 86400)
+    if fresh:
         try:
             with open(path, encoding='utf-8') as fh:
                 payload = json.load(fh)
@@ -109,8 +114,9 @@ def load_sec_filers():
         payload = get_json('https://www.sec.gov/files/company_tickers.json')
         if payload:
             os.makedirs(cache_dir, exist_ok=True)
-            with open(path, 'w', encoding='utf-8') as fh:
+            with open(path + '.tmp', 'w', encoding='utf-8') as fh:
                 json.dump(payload, fh)
+            os.replace(path + '.tmp', path)
     if not payload:
         log.warning('company_tickers.json unavailable; cannot distinguish '
                     '"no fundamentals" from "unidentified issuer"')
@@ -135,7 +141,12 @@ def build(quarter, as_of, min_funds, min_held, audit=0):
     log.info('Reading fundamentals as of %s (newest mark date), not %s',
              fundamentals_asof, as_of)
 
+    # The NAME index comes from the newest snapshot — identity does not leak
+    # the future. The VALUES attached to each row come from the snapshot as
+    # of that row's own mark date (below): one snapshot for the whole quarter
+    # attached fundamentals up to 211 days newer than a row's price.
     fundamentals = IssuerFundamentals(as_of=fundamentals_asof)
+    fundamentals_by_date = {fundamentals_asof: fundamentals}
     crosswalk = CusipCrosswalk(index=fundamentals.names())
     filer_crosswalk = CusipCrosswalk(index=load_sec_filers())
 
@@ -200,7 +211,11 @@ def build(quarter, as_of, min_funds, min_held, audit=0):
         row['coupon_rate'] = rate / 100.0 if rate is not None else None
 
         resolution = resolutions.get(mark['cusip'][:6].upper(), {})
-        fundamentals.attach(row, resolution, report_date)
+        dated = fundamentals_by_date.get(report_date)
+        if dated is None:
+            dated = fundamentals_by_date[report_date] = \
+                IssuerFundamentals(as_of=report_date)
+        dated.attach(row, resolution, report_date)
         rows.append(row)
 
     log.info('Universe: %d bonds (%d filtered out)', len(rows),
@@ -216,6 +231,12 @@ def report(rows, groups, resolutions, fundamentals, filtered, audit):
     print(f"  CORPORATE UNIVERSE  —  {len(rows):,} bonds, "
           f"${total_held / 1e9:,.0f}bn held")
     print(f"{'=' * 78}")
+
+    lookahead = sum(1 for r in rows if r.get('_fundamentals_lookahead_rejected'))
+    negative = sum(1 for r in rows if (r.get('_fundamentals_age_days') or 0) < 0)
+    print(f"\n  Point-in-time: {lookahead:,} rows refused fundamentals struck "
+          f"after their mark; {negative} rows attached with negative age "
+          f"(must be 0)")
 
     if filtered:
         print(f"\n  FILTERED OUT ({sum(filtered.values()):,})")

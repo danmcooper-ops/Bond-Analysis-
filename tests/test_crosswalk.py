@@ -322,3 +322,38 @@ def test_security_listing_patterns(name):
 ])
 def test_real_company_names_are_not_mistaken_for_securities(name):
     assert not is_security_listing(name)
+
+
+# --- point-in-time fundamentals -------------------------------------------
+
+class _Backend:
+    def __init__(self, entries):
+        self.entries = entries
+
+    def load(self):
+        return self.entries
+
+    def names(self):
+        return [(k, v.get('company_name')) for k, v in self.entries.items()]
+
+    def schema_fields(self):
+        return {'int_cov'}
+
+
+def test_fundamentals_struck_after_the_mark_are_refused():
+    from datetime import date
+
+    from data.issuer_fundamentals import IssuerFundamentals
+    fund = IssuerFundamentals(backends=[_Backend({
+        'ACME': {'company_name': 'Acme', 'int_cov': 8.0,
+                 '_fundamentals_asof': '2026-06-30'}})])
+    row = {}
+    attached = fund.attach(row, {'key': 'ACME', 'method': 'exact',
+                                 'confidence': 1.0}, date(2026, 4, 30))
+    assert attached is False
+    assert row['_fundamentals_lookahead_rejected'] is True
+    assert 'issuer_int_cov' not in row
+
+    row = {}
+    assert fund.attach(row, {'key': 'ACME'}, date(2026, 7, 31)) is True
+    assert row['_fundamentals_age_days'] == 31

@@ -137,6 +137,7 @@ class TreasuryDirectClient:
             'data', 'cache', 'treasury_direct')
         self.max_age_days = max_age_days
         self._memo = {}
+        self.failed_ranges = []
 
     def _cache_path(self, key):
         return os.path.join(self.cache_dir, f'{key}.json')
@@ -193,14 +194,19 @@ class TreasuryDirectClient:
         payload = get_json(SEARCH_URL, params=params)
         if payload is None:
             log.error('TreasuryDirect search failed for %s..%s', start, end)
+            self.failed_ranges.append((start, end))
             return []
         if not isinstance(payload, list):
             log.error('Unexpected TreasuryDirect payload type: %s',
                       type(payload).__name__)
+            self.failed_ranges.append((start, end))
             return []
 
         self._memo[key] = payload
-        self._save_cache(key, payload)
+        # An empty reply is not cached: a transient [] would otherwise drop a
+        # whole maturity year from the universe for the cache's full TTL.
+        if payload:
+            self._save_cache(key, payload)
         log.info('TreasuryDirect: %d securities maturing %s..%s',
                  len(payload), start, end)
         return payload
@@ -219,8 +225,13 @@ class TreasuryDirectClient:
             y1 = date(target.year + offset, 12, 31)
             if y1 < target:
                 continue
-            for row in self.fetch_by_maturity_range(max(y0, target), y1,
-                                                     force=force):
+            # Always fetch WHOLE calendar years and filter in memory. Starting
+            # the first chunk at `target` put today's date in the cache key,
+            # so that chunk missed the cache every day and left a new file.
+            for row in self.fetch_by_maturity_range(y0, y1, force=force):
+                maturity = _parse_date(row.get('maturityDate'))
+                if maturity is not None and maturity < target:
+                    continue
                 cusip = row.get('cusip')
                 if cusip and cusip not in seen:
                     seen.add(cusip)
@@ -259,11 +270,16 @@ class TreasuryDirectClient:
                 continue
             # originalIssueDate is present on reopenings and points at the
             # first auction; issueDate is this particular reopening's.
-            issued = (_parse_date(rec.get('originalIssueDate'))
-                      or _parse_date(rec.get('issueDate')) or date.max)
+            # Every reopening shares originalIssueDate, so that alone left the
+            # winner to record order. Break ties toward the original auction
+            # (reopening 'No'), then the earliest actual issue date.
+            rank = ((_parse_date(rec.get('originalIssueDate'))
+                     or _parse_date(rec.get('issueDate')) or date.max),
+                    str(rec.get('reopening') or '').strip().lower() == 'yes',
+                    _parse_date(rec.get('issueDate')) or date.max)
             prior = by_cusip.get(cusip)
-            if prior is None or issued < prior[0]:
-                by_cusip[cusip] = (issued, rec)
+            if prior is None or rank < prior[0]:
+                by_cusip[cusip] = (rank, rec)
         deduped = [rec for _, rec in by_cusip.values()]
         if len(deduped) < len(records):
             log.info('TreasuryDirect: %d auction records -> %d distinct CUSIPs '

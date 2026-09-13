@@ -118,14 +118,14 @@ class FREDClient:
             return None
         return {date.fromisoformat(k): v for k, v in raw['obs'].items()}
 
-    def _save_cache(self, series_id, obs):
+    def _save_cache(self, series_id, obs, source=None):
         import json
         os.makedirs(self.cache_dir, exist_ok=True)
         path = self._cache_path(series_id)
         tmp = f'{path}.tmp.{os.getpid()}'
         try:
             with open(tmp, 'w', encoding='utf-8') as fh:
-                json.dump({'source': self.history_source,
+                json.dump({'source': source or self.history_source,
                            'obs': {k.isoformat(): v for k, v in obs.items()}},
                           fh)
             os.replace(tmp, path)
@@ -178,25 +178,42 @@ class FREDClient:
         Values are divided by 100: FRED publishes both yields and OAS in
         percent, and every consumer in this codebase works in decimals.
         """
-        if not force and series_id in self._memo:
-            return self._memo[series_id]
+        # The memo and cache hold FULL history only. A windowed fetch used to
+        # be stored under the bare series id, so a later full-history lookup
+        # was served the truncated window.
+        windowed = start is not None or end is not None
+        full = None
         if not force:
-            cached = self._load_cache(series_id)
-            if cached is not None:
-                self._memo[series_id] = cached
-                return cached
+            full = self._memo.get(series_id)
+            if full is None:
+                full = self._load_cache(series_id)
+                if full is not None:
+                    self._memo[series_id] = full
+        if full is not None:
+            if not windowed:
+                return full
+            return {d: v for d, v in full.items()
+                    if (start is None or d >= start) and (end is None or d <= end)}
 
-        obs = None
+        obs, source = None, 'keyed'
         if self.api_key:
             obs = self._fetch_keyed(series_id, start=start, end=end)
             if obs is None:
                 log.warning('%s: keyed fetch failed, trying keyless', series_id)
         if obs is None:
+            source = 'keyless'
             obs = self._fetch_keyless(series_id, start=start)
+            if obs and end is not None:
+                obs = {d: v for d, v in obs.items() if d <= end}
+            if obs and self.api_key:
+                # Record the degradation: run_meta reports this field, and it
+                # said 'keyed' for data that came from the keyless fallback.
+                self.history_source = 'keyless'
 
         if not obs:
             log.error('%s: no observations from FRED', series_id)
-            self._memo[series_id] = {}
+            if not windowed:
+                self._memo[series_id] = {}
             return {}
 
         if start and min(obs) > start:
@@ -204,8 +221,9 @@ class FREDClient:
                         '(%d obs, source=%s)', series_id, start, min(obs),
                         len(obs), self.history_source)
 
-        self._memo[series_id] = obs
-        self._save_cache(series_id, obs)
+        if not windowed:
+            self._memo[series_id] = obs
+            self._save_cache(series_id, obs, source=source)
         return obs
 
     # -- convenience --------------------------------------------------------

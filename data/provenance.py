@@ -233,6 +233,7 @@ def append_events(output_dir, run_date, section, events):
     except (OSError, ValueError):
         pass
     data['sections'][section] = {'written_at': now_iso(), 'events': list(events)}
-    with open(path, 'w') as f:
+    with open(path + '.tmp', 'w') as f:
         json.dump(data, f, indent=2, default=str)
+    os.replace(path + '.tmp', path)
     return path

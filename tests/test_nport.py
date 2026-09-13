@@ -384,3 +384,34 @@ def test_consensus_carries_the_ambiguity_flag(sample_nport_rows):
             for r in sample_nport_rows[:3]]
     mark = consensus_mark(rows)[0]
     assert '_coupon_unit_ambiguous' in mark
+
+
+def test_unanimous_prices_still_reject_a_wild_outlier():
+    kept, rejected = reject_outliers([99.5, 99.5, 99.5, 99.5, 60.0])
+    assert rejected == [60.0]
+    assert kept == [99.5] * 4
+
+
+def test_unanimous_prices_keep_noise_inside_the_floor():
+    kept, rejected = reject_outliers([99.5, 99.5, 99.5, 99.9])
+    assert rejected == []
+
+
+def test_an_amendment_supersedes_the_original_for_the_same_series_month():
+    from datetime import date
+
+    from data.nport_client import latest_filings
+    month = date(2026, 3, 31)
+    subs = [
+        {'accession': 'orig', 'report_date': month,
+         'filing_date': date(2026, 5, 20), 'sub_type': 'NPORT-P'},
+        {'accession': 'amend', 'report_date': month,
+         'filing_date': date(2026, 6, 2), 'sub_type': 'NPORT-P/A'},
+        {'accession': 'other-fund', 'report_date': month,
+         'filing_date': date(2026, 5, 20), 'sub_type': 'NPORT-P'},
+        {'accession': 'no-series', 'report_date': month,
+         'filing_date': date(2026, 5, 20), 'sub_type': 'NPORT-P'},
+    ]
+    series = {'orig': 'S1', 'amend': 'S1', 'other-fund': 'S2'}
+    assert latest_filings(subs, series) == {
+        'amend': month, 'other-fund': month, 'no-series': month}

@@ -435,3 +435,105 @@ def test_run_with_timeout_returns_none_on_exception():
     def boom():
         raise RuntimeError('nope')
     assert run_with_timeout(boom, 1.0) is None
+
+
+# --- MSPD reopenings --------------------------------------------------------
+
+def test_mspd_outstanding_row_wins_over_later_tranche_rows():
+    from data.mspd_client import amounts_from_records
+    records = [
+        {'security_class1_desc': 'Notes', 'security_class2_desc': '912828ZQ6',
+         'outstanding_amt': '109700', 'issued_amt': '29400', 'redeemed_amt': None},
+        {'security_class1_desc': 'Notes', 'security_class2_desc': '912828ZQ6',
+         'outstanding_amt': None, 'issued_amt': '40000', 'redeemed_amt': None},
+        {'security_class1_desc': 'Notes', 'security_class2_desc': '912828ZQ6',
+         'outstanding_amt': None, 'issued_amt': '29400', 'redeemed_amt': None},
+    ]
+    amounts, sources = amounts_from_records(records)
+    assert amounts['912828ZQ6'] == pytest.approx(109_700e6)
+    assert sources['outstanding'] == 1
+
+
+def test_mspd_tranches_without_a_total_are_summed():
+    from data.mspd_client import amounts_from_records
+    records = [
+        {'security_class1_desc': 'Bills', 'security_class2_desc': '912797US4',
+         'outstanding_amt': None, 'issued_amt': '100000', 'redeemed_amt': None},
+        {'security_class1_desc': 'Bills', 'security_class2_desc': '912797US4',
+         'outstanding_amt': None, 'issued_amt': '88200', 'redeemed_amt': None},
+    ]
+    amounts, _ = amounts_from_records(records)
+    assert amounts['912797US4'] == pytest.approx(188_200e6)
+
+
+# --- FRED windowed fetches and source tracking -----------------------------
+
+def test_fred_windowed_fetch_never_poisons_the_full_history_cache(tmp_path, monkeypatch):
+    client = FREDClient(cache_dir=str(tmp_path))
+    client.api_key = 'x' * 32
+    full = {date(2020, 1, 2): 0.01, date(2026, 8, 5): 0.02}
+    calls = []
+
+    def keyed(series_id, start=None, end=None):
+        calls.append((start, end))
+        return {d: v for d, v in full.items()
+                if (start is None or d >= start) and (end is None or d <= end)}
+    monkeypatch.setattr(client, '_fetch_keyed', keyed)
+
+    window = client.fetch_series('DGS10', end=date(2021, 1, 1))
+    assert window == {date(2020, 1, 2): 0.01}
+    assert client.fetch_series('DGS10') == full          # not the window
+    # Now cached in full: a window is sliced, not refetched.
+    assert client.fetch_series('DGS10', start=date(2026, 1, 1)) == \
+        {date(2026, 8, 5): 0.02}
+    assert len(calls) == 2
+
+
+def test_fred_keyless_fallback_is_recorded(tmp_path, monkeypatch):
+    client = FREDClient(cache_dir=str(tmp_path))
+    client.api_key = 'x' * 32
+    client.history_source = 'keyed'
+    monkeypatch.setattr(client, '_fetch_keyed', lambda *a, **k: None)
+    monkeypatch.setattr(client, '_fetch_keyless',
+                        lambda *a, **k: {date(2026, 8, 5): 0.02})
+    client.fetch_series('DGS10')
+    assert client.history_source == 'keyless'
+
+
+def test_year_end_curve_cache_stays_open_into_january():
+    from data.treasury_curve_client import _year_still_open
+    assert _year_still_open(2026, date(2026, 12, 31))
+    assert _year_still_open(2026, date(2027, 1, 2))
+    assert not _year_still_open(2026, date(2027, 2, 1))
+    assert not _year_still_open(2025, date(2027, 1, 2))
+
+
+# --- TreasuryDirect cache keys ---------------------------------------------
+
+def test_treasury_direct_fetches_whole_years_and_skips_caching_empty(tmp_path, monkeypatch):
+    import data.treasury_direct_client as tdc
+    client = TreasuryDirectClient(cache_dir=str(tmp_path))
+    requested = []
+
+    def fake_get_json(url, params=None, **kw):
+        requested.append((params['startDate'], params['endDate']))
+        if params['startDate'].startswith('2027'):
+            return []
+        return [{'cusip': '91282CAA1', 'maturityDate': '2026-08-31T00:00:00'},
+                {'cusip': '91282CBB2', 'maturityDate': '2026-11-30T00:00:00'}]
+    monkeypatch.setattr(tdc, 'get_json', fake_get_json)
+
+    rows = client.fetch_outstanding(as_of=date(2026, 9, 14), max_years=1)
+    assert requested[0] == ('2026-01-01', '2026-12-31')
+    assert [r['cusip'] for r in rows] == ['91282CBB2']   # matured one filtered
+    files = sorted(p.name for p in tmp_path.iterdir())
+    assert files == ['mat_20260101_20261231_all.json']    # empty 2027 not cached
+    assert client.failed_ranges == []
+
+
+def test_treasury_direct_failures_are_recorded(tmp_path, monkeypatch):
+    import data.treasury_direct_client as tdc
+    client = TreasuryDirectClient(cache_dir=str(tmp_path))
+    monkeypatch.setattr(tdc, 'get_json', lambda *a, **k: None)
+    client.fetch_outstanding(as_of=date(2026, 9, 14), max_years=0)
+    assert client.failed_ranges == [(date(2026, 1, 1), date(2026, 12, 31))]

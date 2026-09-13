@@ -79,9 +79,10 @@ def reject_outliers(prices, mad_k=CONSENSUS_MAD_K, floor=MIN_OUTLIER_BAND):
     if len(prices) < 3:
         return list(prices), []
     centre = _median(prices)
-    mad = _mad(prices, centre)
-    if not mad:
-        return list(prices), []
+    # MAD is 0 whenever most funds report the same price — the COMMON case —
+    # and returning early then kept any outlier: [99.5 x4, 60] kept the 60.
+    # The absolute and relative floors still define a sensible band.
+    mad = _mad(prices, centre) or 0.0
     limit = max(mad_k * mad * MAD_TO_SIGMA, floor, abs(centre) * MIN_OUTLIER_REL)
     kept = [p for p in prices if abs(p - centre) <= limit]
     rejected = [p for p in prices if abs(p - centre) > limit]

@@ -50,7 +50,10 @@ def ingest(quarter, force=False, drop_zip=False):
     import pandas as pd
     frame = pd.DataFrame(marks)
     path = marks_path(client, quarter)
-    frame.to_parquet(path, index=False)
+    # Temp file + rename: an interrupted write must not leave a truncated
+    # marks file that the next analysis run reads as complete.
+    frame.to_parquet(path + '.tmp', index=False)
+    os.replace(path + '.tmp', path)
     log.info('Wrote %s (%d rows, %.1f MB)', os.path.basename(path),
              len(frame), os.path.getsize(path) / 1e6)
 

@@ -62,6 +62,11 @@ class EquitySnapshotBackend:
         they stood when the price was struck.
         """
         self.as_of = as_of
+        # Read .env here rather than relying on data.http having been
+        # imported first; without it EQUITY_SNAPSHOT_DIR silently fell back
+        # to a path that does not exist and every issuer lost its credit gates.
+        from data.http import load_dotenv
+        load_dotenv()
         # The old default here walked up three directories to find <parent
         # repo>/output, which worked only because this repo used to live INSIDE
         # the stock-analysis-model checkout. It is now standalone, so that walk
@@ -264,6 +269,15 @@ class IssuerFundamentals:
             row['_fundamentals_missing'] = True
             return False
 
+        age = self.age_days(entry, as_of)
+        if age is not None and age < 0:
+            # Fundamentals struck after the price: attaching them would put
+            # information into the row that nobody had when it was marked.
+            row['issuer_ticker'] = key
+            row['_fundamentals_missing'] = True
+            row['_fundamentals_lookahead_rejected'] = True
+            return False
+
         row['issuer_ticker'] = key
         # Which issuer fields this data vintage carries, so a gate reading a
         # field the snapshot never had can mask itself instead of scoring 0.
@@ -272,7 +286,7 @@ class IssuerFundamentals:
         row['issuer_company_name'] = entry.get('company_name')
         row['_fundamentals_source'] = entry.get('_fundamentals_source')
         row['_fundamentals_asof'] = entry.get('_fundamentals_asof')
-        row['_fundamentals_age_days'] = self.age_days(entry, as_of)
+        row['_fundamentals_age_days'] = age
         # The gate layer keys applicability off issuer_cik being present;
         # the equity snapshot has no CIK, so the ticker stands in as the
         # issuer identity.
