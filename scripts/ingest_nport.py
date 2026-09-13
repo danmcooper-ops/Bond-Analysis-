@@ -6,9 +6,12 @@
     python scripts/ingest_nport.py --list
 
 Writes data/cache/nport/{quarter}_marks.parquet — one row per CUSIP-month,
-which is the durable artifact. The 440 MB ZIP can be dropped afterwards with
---drop-zip, though keeping it makes a re-parse free if the consensus logic
-changes.
+which is the durable artifact; nothing downstream reads the ZIPs. Each ZIP is
+~440 MB, so after a successful ingest every ZIP older than the newest cached
+quarter is deleted, provided that quarter's marks file exists (a ZIP that was
+never ingested is kept). The newest ZIP stays so a re-parse is free if the
+consensus logic changes; --drop-zip removes it too, --keep-old-zips opts out.
+Re-ingesting an old quarter re-downloads it (~4 min).
 
 Runtime is dominated by the download (~4 min) and the streaming parse of a
 910 MB table (~2 min). Idempotent: a cached ZIP is reused.
@@ -16,6 +19,7 @@ Runtime is dominated by the download (~4 min) and the streaming parse of a
 
 import argparse
 import os
+import re
 import sys
 from collections import Counter
 
@@ -32,7 +36,37 @@ def marks_path(client, quarter):
     return os.path.join(client.cache_dir, f'{quarter}_marks.parquet')
 
 
-def ingest(quarter, force=False, drop_zip=False):
+_ZIP_RE = re.compile(r'^(\d{4}q[1-4])_nport\.zip$')
+
+
+def prune_old_zips(cache_dir, ingested=None):
+    """Delete ZIPs older than the newest quarter whose marks exist.
+
+    The newest quarter is the latest cached ZIP or *ingested*, whichever is
+    later, so --drop-zip removing the just-ingested ZIP does not promote an
+    older one to "newest". Returns the removed file names. Quarter names
+    ('2026q2') sort chronologically as strings.
+    """
+    if not os.path.isdir(cache_dir):
+        return []
+    quarters = sorted(m.group(1) for m in map(_ZIP_RE.match, os.listdir(cache_dir))
+                      if m)
+    newest = max(quarters + ([ingested] if ingested else []), default=None)
+    removed = []
+    for quarter in quarters:
+        if quarter >= newest:
+            continue
+        name = f'{quarter}_nport.zip'
+        if not os.path.exists(os.path.join(cache_dir, f'{quarter}_marks.parquet')):
+            log.warning('Keeping %s: no marks built from it yet', name)
+            continue
+        os.remove(os.path.join(cache_dir, name))
+        log.info('Removed old %s', name)
+        removed.append(name)
+    return removed
+
+
+def ingest(quarter, force=False, drop_zip=False, prune_zips=True):
     client = NPORTClient()
     if client.download_quarter(quarter, force=force) is None:
         return None
@@ -64,6 +98,8 @@ def ingest(quarter, force=False, drop_zip=False):
         if os.path.exists(zip_path):
             os.remove(zip_path)
             log.info('Removed %s', os.path.basename(zip_path))
+    if prune_zips:
+        prune_old_zips(client.cache_dir, ingested=quarter)
     return path
 
 
@@ -120,6 +156,8 @@ def main():
     ap.add_argument('--force', action='store_true', help='re-download')
     ap.add_argument('--drop-zip', action='store_true',
                     help='delete the ZIP once the marks are built')
+    ap.add_argument('--keep-old-zips', action='store_true',
+                    help='do not delete ZIPs older than the newest cached quarter')
     args = ap.parse_args()
 
     client = NPORTClient()
@@ -142,8 +180,8 @@ def main():
         quarter = quarters[-1]
         log.info('Latest published quarter: %s', quarter)
 
-    return 0 if ingest(quarter, force=args.force,
-                       drop_zip=args.drop_zip) else 1
+    return 0 if ingest(quarter, force=args.force, drop_zip=args.drop_zip,
+                       prune_zips=not args.keep_old_zips) else 1
 
 
 if __name__ == '__main__':

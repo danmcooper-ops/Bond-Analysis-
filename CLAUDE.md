@@ -123,7 +123,7 @@ pytest
 Pipeline (see the plan for the full milestone sequence):
 
 ```bash
-python scripts/ingest_nport.py --quarter 2026q1        # monthly, 30-90 min
+python scripts/ingest_nport.py --quarter 2026q1        # monthly, 30-90 min; prunes older ~440 MB ZIPs whose marks exist
 python scripts/build_universe.py --month 2026-06
 python scripts/analyze_bonds.py --as-of 2026-08-06     # daily, 5-15 min
 python scripts/report_html.py                          # render the HTML page
