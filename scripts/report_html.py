@@ -95,7 +95,8 @@ COLUMNS = [
      "Observed spread minus fair spread. POSITIVE MEANS CHEAP — you are paid "
      "more than the model thinks the risk deserves. This is the model's main "
      "valuation signal, and the one the backtest supports: the cheapest fifth "
-     "beat the richest by about 27bp per month."),
+     "beat the richest by about 26bp of monthly excess return, in 10 of 11 "
+     "months (backtest of 2026-09-14)."),
     ('implied_bucket', 'Model', 'bucket', 62,
      "The credit bucket implied by the issuer's financials — a six-factor "
      "scorecard, NOT an agency rating. It does not predict forward spread "
@@ -460,10 +461,11 @@ h2[data-tip]::after {{ content:" \24D8"; opacity:.4; font-size:12px; }}
 <li><strong>Prices are monthly and about {mark_age} days old.</strong> They come from
 SEC Form N-PORT fund holdings, the only free per-CUSIP source. Every price shown is
 that mark aged onto today's curve — an estimate, never a quote.</li>
-<li><strong>The credit signal is unvalidated.</strong> The backtest can measure relative
-value (cheap bonds beat rich ones by ~27bp per month, monotonically across quintiles),
-but the model's implied rating does <em>not</em> predict forward spread change. Treat the
-credit column as a description, not a forecast.</li>
+<li><strong>The ratings themselves do not yet predict returns.</strong> In a point-in-time
+backtest over 11 months (run 2026-09-14), BUY and LEAN BUY did <em>not</em> beat HOLD and PASS
+(positive in only 5 of 11 months). What did hold up is relative value: the cheapest fifth by
+spread mispricing beat the richest by ~26bp of monthly excess return in 10 of 11 months. Sort
+by the Mispr column, and read the rating as a data-quality-aware summary, not a forecast.</li>
 <li><strong>{capped_pct}% of rows carry a rating cap</strong> — mostly because the issuer
 could not be identified. A capped row still shows its uncapped rating; the cap says the
 data does not support acting on it.</li>

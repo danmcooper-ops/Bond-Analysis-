@@ -108,6 +108,26 @@ These are not caveats to bury; they belong on the report itself.
   defaults to senior unsecured, marked `seniority_source='default'`.
 - **Coverage is what funds hold.** A bond no registered fund owns is invisible.
   The universe is survivorship-shaped toward index-eligible, liquid names.
+- **Validation status (backtest of 2026-09-14, model 2026.09.15).** Marked-to-
+  marked excess returns over duration-matched Treasuries, 88,520 bond-months,
+  11 monthly periods (2025-05 to 2026-03), fundamentals point-in-time via SEC
+  XBRL for ~46% of bonds per period. Output: `output/backtest/`.
+
+  | test | result | periods |
+  |---|---|---|
+  | spread level (carry) Q5-Q1 | +34.9 bp/month | 8/11 PASS |
+  | spread mispricing Q5-Q1 | +26.4 bp/month | 10/11 PASS |
+  | divergence rising - falling | positive | 9/11 PASS |
+  | implied bucket orders spread change | not monotone | FAIL |
+  | BUY+LEAN - HOLD+PASS (after caps) | -1.1 bp/month | 5/11 FAIL |
+  | same, raw ratings (before caps) | +2.4 bp/month | 7/11 |
+  | composite Q5-Q1 | +15.6 bp/month, not monotone | 9/11 FAIL |
+
+  **The rating does not predict returns; spread mispricing does.** Do not tune
+  thresholds or weights against these returns to make the rating pass: that
+  fits the model to the test and brings back look-ahead. Hindsight still in
+  the test: term-structure factors, credit cutpoints and class thresholds were
+  fitted on later data (the backtest prints this every run).
 - **A stale mark can masquerade as mispricing.** "The market hasn't caught up"
   is often "our data hasn't caught up". Divergence only counts as a fallen
   angel when the fundamental deterioration predates the mark date.
