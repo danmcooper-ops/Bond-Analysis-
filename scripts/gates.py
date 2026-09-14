@@ -665,7 +665,13 @@ def rating_cap_for_row(row, params=None):
                                                  MAX_FUNDAMENTALS_AGE_DAYS):
         add('HOLD', f'stale issuer fundamentals ({fund_age}d)')
 
-    if row.get('issuer_altman_z_zone') == 'distress':
+    # Altman Z is a manufacturing-era bankruptcy model: for a bank or insurer
+    # the working-capital and asset-turnover terms describe the balance sheet
+    # of a lender, not distress. The equity snapshot rates Everest Group and
+    # RenaissanceRe 'distress'; the scorecard already excludes financials, and
+    # so must the cap (70 financial bonds were capped on 2026-09-13).
+    if (row.get('issuer_altman_z_zone') == 'distress'
+            and row.get('issuer_sector') != FINANCIAL_SECTOR_NAME):
         add('HOLD', 'Altman Z distress zone')
 
     coverage = row.get('_data_coverage_score')

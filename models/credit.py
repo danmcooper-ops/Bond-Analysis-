@@ -164,10 +164,8 @@ def implied_bucket(fundamentals, sector=None, params=None):
     coverage = result.get('coverage') or 0.0
     if result['score'] is None or coverage < MIN_FACTOR_COVERAGE:
         result['bucket'] = None
-        result['confident'] = False
         return result
     result['bucket'] = bucket_from_score(result['score'], params)
-    result['confident'] = coverage >= 0.75
     return result
 
 

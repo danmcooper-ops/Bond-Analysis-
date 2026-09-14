@@ -819,3 +819,12 @@ def test_market_bucket_uses_geometric_midpoints():
     assert market_implied_bucket(0.020, 5.0, oas, bucket_anchors=anchors) == 'B'
     assert market_implied_bucket(0.060, 5.0, oas, bucket_anchors=anchors) == 'CCC'
     # Nearest-distance would have called 300bp B (171bp away vs 150bp).
+
+
+def test_altman_distress_cap_skips_financials():
+    from scripts.gates import rating_cap_for_row
+    distressed = {'issuer_altman_z_zone': 'distress'}
+    _, reasons = rating_cap_for_row({**distressed, 'issuer_sector': 'Financial Services'})
+    assert not any('Altman' in r for r in reasons)
+    cap, reasons = rating_cap_for_row({**distressed, 'issuer_sector': 'Industrials'})
+    assert cap == 'HOLD' and any('Altman' in r for r in reasons)

@@ -309,7 +309,6 @@ def apply_credit_model(rows, params):
         row['issuer_credit_coverage'] = result.get('coverage')
         row['issuer_scorecard'] = result.get('scorecard')
         row['implied_bucket'] = result.get('bucket')
-        row['_credit_confident'] = result.get('confident', False)
         row['asset_class'] = credit.asset_class_for(result.get('bucket'))
         if result.get('bucket'):
             scored += 1
