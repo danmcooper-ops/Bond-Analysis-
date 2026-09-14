@@ -239,3 +239,63 @@ def test_periods_below_the_scored_share_are_untestable():
     assert coverage[good][1] == 0.30 and coverage[thin][1] == 0.05
     kept = bt.testable_records(records, coverage)
     assert {r['period'] for r in kept} == {good}
+
+
+# --- rating-level backtest test --------------------------------------------
+
+def _rated_records(periods, spread_fn, seed=7):
+    import random
+    from datetime import date
+    rng = random.Random(seed)
+    out = []
+    for m in range(periods):
+        when = date(2025 + m // 12, 1 + m % 12, 28)
+        for i in range(200):
+            rating = ['BUY', 'LEAN BUY', 'HOLD', 'PASS'][i % 4]
+            out.append({'period': when, 'cusip': f'{m}-{i}', 'rating': rating,
+                        'rating_raw': rating,
+                        'excess_return': spread_fn(rating, rng)})
+    return out
+
+
+def test_rating_test_finds_a_real_edge_in_every_period():
+    import scripts.backtest as bt
+    edge = lambda r, rng: (0.004 if r in ('BUY', 'LEAN BUY') else 0.0) + rng.gauss(0, 0.002)
+    result = bt.rating_test(_rated_records(6, edge))
+    assert result['wins'] == result['periods'] == 6
+    assert result['spread'] > 0.003
+
+
+def test_rating_test_on_noise_is_a_coin_flip():
+    import scripts.backtest as bt
+    noise = lambda r, rng: rng.gauss(0, 0.002)
+    wins = sum(bt.rating_test(_rated_records(12, noise, seed=s))['wins']
+               for s in range(10))
+    assert 35 <= wins <= 85                    # ~60 of 120 expected
+
+
+def test_rating_test_skips_periods_thin_on_either_side():
+    from datetime import date
+
+    import scripts.backtest as bt
+    records = ([{'period': date(2026, 1, 31), 'rating': 'BUY', 'excess_return': 0.01}] * 5
+               + [{'period': date(2026, 1, 31), 'rating': 'PASS', 'excess_return': 0.0}] * 50)
+    assert bt.rating_test(records) is None
+
+
+def test_universe_rows_at_applies_the_build_filters():
+    from datetime import date
+
+    import scripts.backtest as bt
+    when = date(2026, 3, 31)
+    base = {'report_date': when, 'cusip': 'X', 'annualized_rate': 5.0}
+    rows = [
+        {**base, 'maturity_date': date(2030, 1, 1), 'clean_price_marked': 99.0},
+        {**base, 'maturity_date': date(2026, 6, 1), 'clean_price_marked': 99.0},   # < 0.5y
+        {**base, 'maturity_date': date(2030, 1, 1), 'clean_price_marked': 5.0},    # price
+        {**base, 'report_date': date(2026, 2, 28), 'maturity_date': date(2030, 1, 1),
+         'clean_price_marked': 99.0},                                               # other month
+    ]
+    out = bt.universe_rows_at(rows, when)
+    assert len(out) == 1
+    assert out[0]['coupon_rate'] == 0.05 and out[0]['mark_date'] == when

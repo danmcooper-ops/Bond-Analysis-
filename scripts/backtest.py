@@ -537,6 +537,155 @@ def decile_test(records, key, label, n_buckets=5):
             'monotone': monotone}
 
 
+# ---------------------------------------------------------------------------
+# Rating-level test: re-score each month with the production pipeline
+# ---------------------------------------------------------------------------
+
+UPPER = ('BUY', 'LEAN BUY')
+LOWER = ('HOLD', 'PASS')
+MIN_PER_SIDE = 10
+
+
+def universe_rows_at(rows, when):
+    """Panel rows for one month, passed through the universe build's filters."""
+    from scripts.config import (MIN_YEARS_TO_MATURITY, PRICE_SANITY_MAX,
+                                PRICE_SANITY_MIN)
+    out = []
+    for mark in rows:
+        if mark['report_date'] != when:
+            continue
+        maturity = mark.get('maturity_date')
+        price = mark.get('clean_price_marked')
+        if maturity is None or price is None:
+            continue
+        years = (maturity - when).days / 365.25
+        if years < MIN_YEARS_TO_MATURITY:
+            continue
+        if not (PRICE_SANITY_MIN <= price <= PRICE_SANITY_MAX):
+            continue
+        row = dict(mark)
+        rate = row.get('annualized_rate')
+        row.update({
+            'mark_date': when, 'mark_age_days': 0, 'mark_lag_days': 0,
+            'years_to_maturity': years, 'asset_class': 'CORP_IG',
+            'coupon_rate': rate / 100.0 if rate is not None else None,
+        })
+        out.append(row)
+    return out
+
+
+def score_period(rows_at_t, when, pit, params):
+    """{cusip: (rating, rating_raw, composite)} for one month, scored by the
+    SAME code production runs: build_context, apply_credit_model,
+    analyze_bond, score_and_rate. Only the inputs are pinned to `when`:
+    fundamentals point-in-time, curve and bucket OAS as of `when`, and bucket
+    anchors fitted from that month's own bonds. The mark is dated `when`, so
+    the price is the mark itself rather than an aged estimate.
+    """
+    from scripts import analyze_bonds as ab
+    from scripts.gates import SPEC
+    from scripts.scoring_kernel import score_and_rate
+
+    source, _ = pit.fundamentals(when)
+    for row in rows_at_t:
+        resolution = pit.resolution(row['cusip']) or {}
+        source.attach(row, resolution, when)
+    try:
+        ctx = ab.build_context(when)
+    except SystemExit:
+        log.warning('No market context for %s; period not scored', when)
+        return {}
+    ctx['bucket_anchors'] = pit.anchors(when, params)
+    ctx['data_vintage'] = when
+
+    ab.apply_credit_model(rows_at_t, params)
+    scored = [out for row in rows_at_t
+              if (out := ab.analyze_bond(row, ctx, when, params)) is not None]
+    if not scored:
+        return {}
+    score_and_rate(scored, SPEC, params=params)
+    return {r['cusip']: (r.get('rating'), r.get('rating_raw'),
+                         r.get('_composite_score')) for r in scored}
+
+
+def attach_ratings(records, rows, pit, params):
+    """Add rating, rating_raw and composite to each record from its period."""
+    for when in sorted({r['period'] for r in records}):
+        ratings = score_period(universe_rows_at(rows, when), when, pit, params)
+        log.info('Scored %s: %d bonds rated', when, len(ratings))
+        for record in records:
+            if record['period'] == when and record['cusip'] in ratings:
+                rating, raw, composite = ratings[record['cusip']]
+                record.update({'rating': rating, 'rating_raw': raw,
+                               'composite': composite})
+
+
+def rating_test(records, field='rating'):
+    """Do BUY/LEAN BUY bonds out-earn HOLD/PASS bonds, period by period?"""
+    by_period = defaultdict(list)
+    for r in records:
+        if r.get(field) and r.get('excess_return') is not None:
+            by_period[r['period']].append(r)
+
+    table, wins, spreads = [], 0, []
+    for period, rows in sorted(by_period.items()):
+        upper = [r['excess_return'] for r in rows if r[field] in UPPER]
+        lower = [r['excess_return'] for r in rows if r[field] in LOWER]
+        if len(upper) < MIN_PER_SIDE or len(lower) < MIN_PER_SIDE:
+            continue
+        means = {label: _mean([r['excess_return'] for r in rows
+                               if r[field] == label])
+                 for label in UPPER + LOWER
+                 if any(r[field] == label for r in rows)}
+        spread = _mean(upper) - _mean(lower)
+        spreads.append(spread)
+        wins += spread > 0
+        table.append((period, len(upper), len(lower), spread, means))
+    if not table:
+        return None
+    return {'field': field, 'wins': wins, 'periods': len(table),
+            'spread': _mean(spreads), 'table': table}
+
+
+def print_rating_test(result, label):
+    print(f"\n  {label}")
+    if result is None:
+        print(f"    no period has {MIN_PER_SIDE}+ bonds on each side")
+        return
+    print(f"    {'period':<12}{'n up':>6}{'n down':>8}{'BUY':>8}{'LEAN':>8}"
+          f"{'HOLD':>8}{'PASS':>8}{'up-down':>10}")
+    for period, n_up, n_down, spread, means in result['table']:
+        cells = ''.join(f"{means[k] * 10000:>8.1f}" if k in means else f"{'—':>8}"
+                        for k in ('BUY', 'LEAN BUY', 'HOLD', 'PASS'))
+        flag = '' if spread > 0 else '   <-- wrong sign'
+        print(f"    {str(period):<12}{n_up:>6}{n_down:>8}{cells}"
+              f"{spread * 10000:>10.1f}{flag}")
+    print(f"\n    BUY+LEAN minus HOLD+PASS  {result['spread'] * 10000:>6.1f} bp per "
+          f"period, positive in {result['wins']}/{result['periods']} periods "
+          f"(bp of monthly excess return)")
+
+
+def print_hindsight():
+    """What in this run was fitted on data later than the observations."""
+    from scripts.fit_term_structure import TERM_STRUCTURE_PATH
+    buckets_from = None
+    try:
+        import json
+        with open(TERM_STRUCTURE_PATH, encoding='utf-8') as fh:
+            buckets_from = json.load(fh).get('buckets_from')
+    except (OSError, ValueError):
+        pass
+    print(f"\n  HINDSIGHT IN THIS RUN — fitted on data later than the observations")
+    print(f"    term-structure factors   pooled across the whole panel; tiers "
+          f"assigned by {buckets_from or 'the newest'} implied buckets")
+    print(f"    credit cutpoints         calibrated on the newest snapshot")
+    print(f"    class rating thresholds  calibrated on the newest snapshot")
+    print(f"    NOT hindsight: fundamentals (point-in-time by filing date), curves")
+    print(f"    and bucket OAS (as of each month), bucket anchors (fitted per")
+    print(f"    month), INDEX_RATING_MIX (external). Thresholds only place the")
+    print(f"    labels; the composite-quintile test does not depend on them.")
+
+
 def divergence_test(records):
     """Do rising stars beat fallen angels? The headline claim."""
     periods = _by_period(records, 'divergence')
@@ -746,6 +895,17 @@ def main():
     divergence = divergence_test(credit_records)
     buckets = bucket_test(credit_records)
 
+    attach_ratings(credit_records, rows, pit, params)
+    ratings = rating_test(credit_records, 'rating')
+    ratings_raw = rating_test(credit_records, 'rating_raw')
+    print_rating_test(ratings, 'RATINGS (after caps) — BUY/LEAN should beat HOLD/PASS')
+    print_rating_test(ratings_raw, 'RAW RATINGS (before caps)')
+    composite = decile_test([r for r in credit_records
+                             if r.get('composite') is not None],
+                            'composite',
+                            'COMPOSITE QUINTILES — threshold-free')
+    print_hindsight()
+
     print(f"\n{'=' * 78}")
     print("  VERDICT")
     print(f"{'=' * 78}")
@@ -765,6 +925,14 @@ def main():
     if buckets:
         verdicts.append(('implied bucket orders spread change',
                          buckets['monotone'], f"{buckets['buckets']} buckets"))
+    if ratings:
+        verdicts.append(('rating predicts excess return',
+                         ratings['wins'] > ratings['periods'] / 2,
+                         f"{ratings['wins']}/{ratings['periods']} periods"))
+    if composite:
+        verdicts.append(('composite quintiles are monotone', composite['monotone'],
+                         f"{composite['wins']}/{composite['periods']} periods "
+                         f"top>bottom"))
     for label, ok, detail in verdicts:
         print(f"    [{'PASS' if ok else 'FAIL'}]  {label:<44} {detail}")
 
