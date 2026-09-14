@@ -15,7 +15,7 @@ You are running the daily bond analysis routine. Execute the steps in order. Sto
 - **Equity fundamentals:** read automatically from the sibling stock model's snapshots via `EQUITY_SNAPSHOT_DIR` pinned in the repo's `.env`. If the run log says "every issuer will score without credit gates", the `.env` line is missing — report it prominently and continue (the run is still valid, just thinner).
 
 ## IMPORTANT: Command format
-Send every Python invocation as a **single-line semicolon-separated Bash command** (not multi-line) so permission matching works. Use the exact format shown per step.
+Send every Python invocation as a **single-line semicolon-separated Bash command** (not multi-line) so permission matching works. Use the exact format shown per step — **character for character: no output redirection (`>`), pipes, `tee`, `head`/`tail`, or extra flags.** Commands are matched against stored approvals; a changed command waits for a human to click, and on an unattended run nobody does (2026-09-14 stalled at Step 1 because the command had `> …/scratchpad/…` appended). If output is long, read it from the tool result as-is.
 
 ## Run date
 Determine the run date ONCE, at the start, and use that literal value (e.g. `2026-09-14`) in every later step — never re-run `date`, so a run that crosses midnight stays on its start date:

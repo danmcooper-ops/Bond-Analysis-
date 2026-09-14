@@ -178,8 +178,11 @@ not from this code:
   `~/Library/Logs/Claude/main.log`. Change the folder in the app, never by
   editing the JSON while the app runs.
 - **An unapproved command stalls the run until someone clicks.** 2026-09-09
-  waited from 07:03 to 15:05 on a Bash prompt. When a step's command changes,
-  run the task once by hand and choose always-allow.
+  waited from 07:03 to 15:05 on a Bash prompt, and 2026-09-14 never finished:
+  the session ran in `default` permission mode and the agent appended an
+  output redirect to the Step 1 command, so no stored rule matched. The skill
+  now forbids altering commands. When a step's command changes, run the task
+  once by hand and choose always-allow for each step.
 
 When `daily_checks.py gaps` reports a missed run, grep
 `~/Library/Logs/Claude/main.log` for `daily-bond-analysis` around 07:00 of that
