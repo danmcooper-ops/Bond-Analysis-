@@ -144,3 +144,29 @@ def test_a_bill_param_override_reaches_bill_rows():
                            'rating_threshold_pass_treasury_bill': 1.0})
     assert rating_from_composite(12.0, params, asset_class='TREASURY_BILL') == 'BUY'
     assert rating_from_composite(12.0, params, asset_class='TREASURY') != 'BUY'
+
+
+def test_tier_comparison_flags_a_long_end_gap():
+    from scripts.fit_term_structure import compare_tier_assignment
+    labels = ['0-3y', '3-5y', '5-7y', '7-10y', '10-15y', '15-20y']
+    buckets = {}
+    for i, label in enumerate(labels):
+        buckets[f'wide|{label}'] = [0.020] * 60                 # flat by spread
+        buckets[f'bucket:wide|{label}'] = [0.020 * (1 + 0.05 * i)] * 60
+    rows, worst = compare_tier_assignment(buckets)
+    assert worst > 0.10                                          # 15-20y: 1.20x vs 1.00x
+    buckets = {k: ([0.020] * 60) for k in buckets}
+    assert compare_tier_assignment(buckets)[1] == 0.0
+
+
+def test_fit_prefers_bucket_assigned_tiers_per_tier():
+    from scripts.fit_term_structure import BUCKETS, fit
+    buckets = {}
+    for _lo, _hi, label, _mid in BUCKETS[:6]:
+        buckets[label] = [0.01] * 600
+        buckets[f'tight|{label}'] = [0.006] * 60
+        buckets[f'wide|{label}'] = [0.02] * 60
+        buckets[f'bucket:tight|{label}'] = [0.006] * 60   # tight fits by bucket
+    tiers = fit(buckets)['by_tier']
+    assert tiers['tight']['assigned_by'] == 'implied_bucket'
+    assert tiers['wide']['assigned_by'] == 'observed_spread'

@@ -127,8 +127,13 @@ def _bucket_for(years):
     return None, None
 
 
-def collect_spreads(min_funds=5):
-    """Observed Z-spreads by maturity bucket, across every ingested month."""
+def collect_spreads(min_funds=5, bucket_by_cusip=None):
+    """Observed Z-spreads by maturity bucket, across every ingested month.
+
+    With `bucket_by_cusip`, each bond with a known implied bucket is ALSO
+    recorded under 'bucket:<tier>|<label>', its tier taken from BUCKET_TIER
+    rather than from its spread, for --diagnose-tiers.
+    """
     import pandas as pd
 
     client = NPORTClient()
@@ -181,6 +186,11 @@ def collect_spreads(min_funds=5):
                                        convention=bond.convention)
             spread = z_spread(record['clean_price_marked'] + accrued, flows,
                               curve_date, curve)
+            if bucket_by_cusip and spread is not None and 0 < spread < 0.10:
+                rated = bucket_by_cusip.get(record.get('cusip'))
+                label, _ = _bucket_for(years_to_maturity(curve_date, bond.maturity))
+                if rated in BUCKET_TIER and label:
+                    buckets[f'bucket:{BUCKET_TIER[rated]}|{label}'].append(spread)
             # The tiers reach wider than the IG proxy (wide runs to 300bp), so
             # filter at the widest tier and apply the IG cap to the universe
             # curve only. Filtering everything at 250bp left the 'wide' tier's
@@ -224,17 +234,42 @@ def fit(buckets):
                       'n': len(values), 'median_spread': round(median, 6),
                       'factor': round(ratio, 4),
                       'fred_factor': FRED_REFERENCE.get(label)})
-    # Per-tier shapes, each normalised to its OWN 3-5y anchor so the curve is
-    # a pure shape and the level still comes from the bucket OAS.
+    # Tiers by IMPLIED BUCKET where the bucket-assigned panel can fit a tier,
+    # by observed spread only for a tier it cannot. Spread assignment pushes a
+    # long bond that trades wide BECAUSE it is long into a wider tier, which
+    # flattens every tier's long end: measured on 2026-09-13 the tight tier's
+    # 32y+ factor was 1.07x by spread and 1.82x by bucket (a 70% gap), and the
+    # wide tier's inversion was largely that artifact. The fallback is per
+    # TIER, not per bond, so unmatched bonds cannot reintroduce the bias.
+    by_bucket = fit_tiers(buckets, 'bucket:')
+    by_spread = fit_tiers(buckets)
     by_tier = {}
     for tier, _lo, _hi in TIERS:
-        anchor_values = buckets.get(f'{tier}|3-5y', [])
+        if tier in by_bucket:
+            by_tier[tier] = {**by_bucket[tier], 'assigned_by': 'implied_bucket'}
+        elif tier in by_spread:
+            by_tier[tier] = {**by_spread[tier], 'assigned_by': 'observed_spread'}
+
+    return {'points': points, 'table': table, 'by_tier': by_tier,
+            'overall_median_spread': round(overall, 6),
+            'n_observations': len(everything),
+            'ig_spread_band': [IG_SPREAD_MIN, IG_SPREAD_MAX],
+            'bucket_tier': BUCKET_TIER,
+            'source': 'nport_panel'}
+
+
+def fit_tiers(buckets, prefix=''):
+    """Per-tier shapes, each normalised to its OWN 3-5y anchor so the curve is
+    a pure shape and the level still comes from the bucket anchor."""
+    by_tier = {}
+    for tier, _lo, _hi in TIERS:
+        anchor_values = buckets.get(f'{prefix}{tier}|3-5y', [])
         if len(anchor_values) < MIN_PER_BUCKET:
             continue
         anchor = statistics.median(anchor_values)
         tier_points, tier_table = [], []
         for _l, _h, label, midpoint in BUCKETS:
-            values = buckets.get(f'{tier}|{label}', [])
+            values = buckets.get(f'{prefix}{tier}|{label}', [])
             if len(values) < MIN_PER_BUCKET:
                 continue
             median = statistics.median(values)
@@ -245,13 +280,74 @@ def fit(buckets):
         if len(tier_points) >= 4:
             by_tier[tier] = {'points': tier_points, 'table': tier_table,
                              'anchor_spread': round(anchor, 6)}
+    return by_tier
 
-    return {'points': points, 'table': table, 'by_tier': by_tier,
-            'overall_median_spread': round(overall, 6),
-            'n_observations': len(everything),
-            'ig_spread_band': [IG_SPREAD_MIN, IG_SPREAD_MAX],
-            'bucket_tier': BUCKET_TIER,
-            'source': 'nport_panel'}
+
+LONG_END_YEARS = 15.0
+TIER_DIFF_THRESHOLD = 0.10
+
+
+def compare_tier_assignment(buckets):
+    """Spread-assigned vs bucket-assigned tier factors, and the verdict.
+
+    Assigning tiers by observed spread before taking per-tenor medians can
+    compress the factors toward 1: a long bond that trades wide because it is
+    long is pushed into a wider tier, so each tier's long end loses exactly the
+    observations that would steepen (or invert) it. Assigning by implied bucket
+    avoids that, at the cost of covering only matched issuers.
+
+    Returns (rows, max_long_end_gap) where rows are
+    (tier, label, spread_factor, bucket_factor).
+    """
+    by_spread, by_bucket = fit_tiers(buckets), fit_tiers(buckets, 'bucket:')
+    rows, worst = [], 0.0
+    for tier, _lo, _hi in TIERS:
+        a = dict((m, f) for m, f in (by_spread.get(tier) or {}).get('points', []))
+        b = dict((m, f) for m, f in (by_bucket.get(tier) or {}).get('points', []))
+        for _l, _h, label, midpoint in BUCKETS:
+            fa, fb = a.get(midpoint), b.get(midpoint)
+            rows.append((tier, label, fa, fb))
+            if fa and fb and midpoint >= LONG_END_YEARS:
+                worst = max(worst, abs(fb / fa - 1.0))
+    return rows, worst
+
+
+def newest_snapshot():
+    import glob
+    paths = sorted(glob.glob(os.path.join(OUTPUT_DIR, 'results_*.parquet')))
+    return paths[-1] if paths else None
+
+
+def load_bucket_map(snapshot):
+    """{cusip: implied_bucket} from a results parquet.
+
+    The snapshot's buckets are applied to every month in the panel. That is
+    hindsight about which bonds are which grade, the same pooled-shape
+    hindsight the fit already carries, and far smaller than the bias spread
+    assignment introduces.
+    """
+    import pandas as pd
+    frame = pd.read_parquet(snapshot, columns=['cusip', 'implied_bucket']).dropna()
+    return dict(zip(frame.cusip, frame.implied_bucket))
+
+
+def diagnose_tiers(min_funds, snapshot):
+    """Print both tier assignments side by side and whether they disagree."""
+    buckets = collect_spreads(min_funds=min_funds,
+                              bucket_by_cusip=load_bucket_map(snapshot))
+    rows, worst = compare_tier_assignment(buckets)
+    print(f"\n  TIER ASSIGNMENT: by observed spread vs by implied bucket "
+          f"({os.path.basename(snapshot)})")
+    print(f"    {'tier':<6}{'tenor':<9}{'by spread':>11}{'by bucket':>11}")
+    for tier, label, fa, fb in rows:
+        if fa is None and fb is None:
+            continue
+        fmt = lambda v: f'{v:.2f}x' if v is not None else '—'
+        print(f"    {tier:<6}{label:<9}{fmt(fa):>11}{fmt(fb):>11}")
+    verdict = ('DIFFER' if worst > TIER_DIFF_THRESHOLD else 'agree')
+    print(f"\n  Largest long-end (>= {LONG_END_YEARS:.0f}y) gap: {worst:.1%} -> "
+          f"assignments {verdict} (threshold {TIER_DIFF_THRESHOLD:.0%})\n")
+    return worst
 
 
 def report(fitted):
@@ -328,9 +424,26 @@ def main():
     ap.add_argument('--min-funds', type=int, default=5)
     ap.add_argument('--apply', action='store_true',
                     help='write output/term_structure.json for the model to use')
+    ap.add_argument('--buckets-from', metavar='SNAPSHOT', default=None,
+                    help='results parquet whose implied buckets assign tiers '
+                         '(default: the newest in output/)')
+    ap.add_argument('--diagnose-tiers', metavar='SNAPSHOT', default=None,
+                    help='compare spread- vs bucket-assigned tiers using the '
+                         'implied buckets in this results parquet; writes nothing')
     args = ap.parse_args()
 
-    fitted = fit(collect_spreads(min_funds=args.min_funds))
+    if args.diagnose_tiers:
+        diagnose_tiers(args.min_funds, args.diagnose_tiers)
+        return 0
+
+    snapshot = args.buckets_from or newest_snapshot()
+    bucket_by_cusip = load_bucket_map(snapshot) if snapshot else None
+    if not bucket_by_cusip:
+        log.warning('No implied buckets available; tiers fall back to observed '
+                    'spread, which flattens their long ends')
+    fitted = fit(collect_spreads(min_funds=args.min_funds,
+                                 bucket_by_cusip=bucket_by_cusip))
+    fitted['buckets_from'] = os.path.basename(snapshot) if snapshot else None
     fitted['fitted_at'] = date.today().isoformat()
     report(fitted)
 
