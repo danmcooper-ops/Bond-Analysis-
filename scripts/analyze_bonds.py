@@ -452,12 +452,9 @@ def _price_with_overlay(row, bond, ctx, settle, flows, accrued):
                     row['z_spread_at_mark'] = z_at_mark
                     row['price_source'] = 'mark_aged_to_curve'
                     clean = dirty - accrued
-                    drift = abs(clean - marked)
-                    row['_mark_drift'] = drift
-                    # A large gap between the raw mark and the aged estimate
-                    # means the rate move since has dominated; worth surfacing
-                    # rather than quietly presenting the estimate as a price.
-                    row['_mark_drift_flag'] = drift > 3.0
+                    # How far ageing moved the price from the raw mark; the
+                    # rating cap in gates.py judges it against duration.
+                    row['_mark_drift'] = abs(clean - marked)
                     return clean, dirty
 
     # The mark cannot be aged. Repricing off the curve at ZERO spread — what

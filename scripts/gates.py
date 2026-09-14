@@ -33,7 +33,8 @@ from scripts.config import (FINANCIAL_SECTOR_NAME, MATURITY_BUCKETS,
                             SCORE_WEIGHT_CREDIT, SCORE_WEIGHT_LIQUIDITY,
                             SCORE_WEIGHT_RATES, SCORE_WEIGHT_STRUCTURE,
                             SCORE_WEIGHT_VALUATION,
-                            HARD_STALE_MARK_DAYS, STALE_MARK_LAG_DAYS)
+                            HARD_STALE_MARK_DAYS, MAX_MARK_DRIFT_PER_DURATION,
+                            MIN_MARK_DRIFT_PTS, STALE_MARK_LAG_DAYS)
 from scripts.scoring_kernel import (RATING_RANK, Gate, ScoringSpec,
                                     _score_linear)
 
@@ -629,6 +630,16 @@ def rating_cap_for_row(row, params=None):
     elif age is not None and age > p.get('hard_stale_mark_days',
                                          HARD_STALE_MARK_DAYS):
         add('HOLD', f'stale mark ({age}d old)')
+
+    # The aged price moved further than duration can explain: the fixed-spread
+    # assumption has failed, typically on distressed short paper.
+    drift = row.get('_mark_drift')
+    duration = row.get('modified_duration')
+    if (drift is not None and row.get('price_source') == 'mark_aged_to_curve'
+            and drift > p.get('min_mark_drift_pts', MIN_MARK_DRIFT_PTS)
+            and drift / max(duration or 0.0, 0.25)
+            > p.get('max_mark_drift_per_duration', MAX_MARK_DRIFT_PER_DURATION)):
+        add('HOLD', f'mark aged {drift:.1f}pt from the raw fund price')
 
     n_funds = row.get('n_funds')
     if n_funds is not None and n_funds < p.get('min_funds_for_buy',

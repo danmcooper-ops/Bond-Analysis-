@@ -26,6 +26,7 @@ from scripts.config import (
     CREDIT_CUT_AAA, CREDIT_CUT_AA, CREDIT_CUT_A, CREDIT_CUT_BBB,
     CREDIT_CUT_BB, CREDIT_CUT_B,
     STALE_MARK_LAG_DAYS, HARD_STALE_MARK_DAYS, MIN_FUNDS_FOR_BUY, MAX_PRICE_DISPERSION,
+    MIN_MARK_DRIFT_PTS, MAX_MARK_DRIFT_PER_DURATION,
     MIN_CUSIP_MATCH_CONFIDENCE, MAX_FUNDAMENTALS_AGE_DAYS,
     MIN_FUNDS_HOLDING, MIN_TOTAL_HELD_USD, MIN_YEARS_TO_MATURITY,
     CONSENSUS_MAD_K,
@@ -76,6 +77,8 @@ def default_params():
         'hard_stale_mark_days': HARD_STALE_MARK_DAYS,
         'min_funds_for_buy': MIN_FUNDS_FOR_BUY,
         'max_price_dispersion': MAX_PRICE_DISPERSION,
+        'min_mark_drift_pts': MIN_MARK_DRIFT_PTS,
+        'max_mark_drift_per_duration': MAX_MARK_DRIFT_PER_DURATION,
         'min_cusip_match_confidence': MIN_CUSIP_MATCH_CONFIDENCE,
         'max_fundamentals_age_days': MAX_FUNDAMENTALS_AGE_DAYS,
 

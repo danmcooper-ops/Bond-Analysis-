@@ -721,3 +721,32 @@ def test_rescoring_is_idempotent_for_run_fields():
     first = rows[1]['_run_issuer_fields']
     prepare_scoring_fields(rows)
     assert rows[1]['_run_issuer_fields'] == first == ('fcf',)
+
+
+# --- mark drift beyond what duration explains -------------------------------
+
+def _aged(drift, duration):
+    return {'_mark_drift': drift, 'modified_duration': duration,
+            'price_source': 'mark_aged_to_curve'}
+
+
+def test_distressed_short_paper_drift_is_capped():
+    from scripts.gates import rating_cap_for_row
+    cap, reasons = rating_cap_for_row(_aged(20.1, 0.32))       # PDVSA
+    assert cap == 'HOLD' and any('mark aged 20.1pt' in r for r in reasons)
+
+
+def test_long_bond_rate_move_is_not_capped():
+    from scripts.gates import rating_cap_for_row
+    # 7pt on a 16-year duration is a normal rates move.
+    _, reasons = rating_cap_for_row(_aged(7.0, 16.0))
+    assert not any('mark aged' in r for r in reasons)
+    _, reasons = rating_cap_for_row(_aged(1.0, 0.2))
+    assert not any('mark aged' in r for r in reasons)
+
+
+def test_drift_on_a_non_aged_price_is_ignored():
+    from scripts.gates import rating_cap_for_row
+    row = {**_aged(20.0, 0.3), 'price_source': 'raw_mark_spread_unsolved'}
+    _, reasons = rating_cap_for_row(row)
+    assert not any('mark aged' in r for r in reasons)

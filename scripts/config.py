@@ -71,6 +71,18 @@ STALE_MARK_LAG_DAYS = 35       # mark older than the dataset's newest -> HOLD
 HARD_STALE_MARK_DAYS = 200     # any mark older than this -> HOLD
 MIN_FUNDS_FOR_BUY = 3          # thinner fund coverage -> HOLD cap
 MAX_PRICE_DISPERSION = 0.02    # cross-fund MAD/median above this -> HOLD cap
+
+# Ageing a mark onto today's curve holds its Z-spread fixed. For ordinary paper
+# the resulting price move is the rate move times duration, and it is large
+# for long bonds: on 2026-09-13 absolute drift ran median 2.6pt, p99 5.4pt,
+# alike for IG, HY and Treasuries, so a flat points cap would demote long IG
+# for a normal rates rally. The failure is different: a short, distressed bond
+# whose huge spread, held constant, manufactures a price (PDVSA marked 33.48,
+# aged to 53.5). Drift PER YEAR OF DURATION separates the two cleanly — p99
+# 1.4, p99.9 5.4, and the tail is all distressed short paper. Both conditions
+# must hold; 16 rows on 2026-09-13, none rated above HOLD.
+MIN_MARK_DRIFT_PTS = 3.0
+MAX_MARK_DRIFT_PER_DURATION = 3.0
 MIN_CUSIP_MATCH_CONFIDENCE = 0.80
 MAX_FUNDAMENTALS_AGE_DAYS = 400
 

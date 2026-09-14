@@ -66,6 +66,11 @@ COLUMNS = [
      "Estimated clean price per 100 face — the last fund mark aged onto today's "
      "curve via the spread it implied. NOT a live quote: the underlying mark is "
      "months old (see the Mark column)."),
+    ('_mark_drift', 'Drift', 'n1', 52,
+     "How far the estimated price sits from the raw fund mark, in points. "
+     "Ageing a mark onto today's curve holds its spread fixed, so this is "
+     "mostly the rate move times duration. Far beyond what duration explains "
+     "(distressed short paper), the row is capped."),
     ('ytw', 'YTW', 'pct2', 68,
      "Yield to worst: the lower of yield-to-maturity and yield-to-call. With no "
      "call schedules in free data this equals yield-to-maturity, so for a "
