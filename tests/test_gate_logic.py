@@ -482,41 +482,79 @@ def test_calibrated_cutpoints_place_most_of_the_universe_in_investment_grade():
     assert CREDIT_CUT_BBB > CREDIT_CUT_BB > CREDIT_CUT_B
 
 
-def test_calibration_matches_the_market_bucket_mix():
-    """Distribution matching: the model's mix should reproduce the market's."""
-    from models.credit import calibrate_cutpoints, bucket_from_score
-    # 100 bonds: market says 40% A, 40% BBB, 20% BB. Scores span 0-99.
-    rows = []
-    for i in range(100):
-        market = 'A' if i >= 60 else ('BBB' if i >= 20 else 'BB')
-        rows.append({'issuer_credit_score': float(i), 'market_bucket': market})
-    cuts = calibrate_cutpoints(rows, min_per_bucket=10, min_rows=50)
-    assert cuts
+def test_calibration_reproduces_an_external_target_mix():
+    """Cutpoints are score quantiles at the target's cumulative shares."""
+    from models.credit import bucket_from_score, calibrate_cutpoints
+    rows = [{'issuer_credit_score': float(i) / 10} for i in range(1000)]
+    target = {'AAA': 0.05, 'AA': 0.10, 'A': 0.25, 'BBB': 0.30,
+              'BB': 0.15, 'B': 0.10, 'CCC': 0.05}
+    cuts = calibrate_cutpoints(rows, target, min_rows=50)
     mix = {}
     for row in rows:
         b = bucket_from_score(row['issuer_credit_score'], cuts)
         mix[b] = mix.get(b, 0) + 1
-    # High-yield share should land near the market's 20%, not the seed's ~50%.
-    hy = sum(mix.get(b, 0) for b in ('BB', 'B', 'CCC'))
-    assert 10 <= hy <= 35, mix
+    for bucket, share in target.items():
+        assert abs(mix.get(bucket, 0) / 1000 - share) <= 0.01, (bucket, mix)
+
+
+def test_calibration_ignores_the_stored_market_bucket():
+    """The circularity: the target must not come from the model's own labels."""
+    from models.credit import calibrate_cutpoints
+    target = {'AAA': 0.1, 'AA': 0.1, 'A': 0.2, 'BBB': 0.2, 'BB': 0.2,
+              'B': 0.1, 'CCC': 0.1}
+    base = [{'issuer_credit_score': float(i)} for i in range(400)]
+    relabelled = [{**r, 'market_bucket': 'B'} for r in base]
+    assert calibrate_cutpoints(base, target, min_rows=50) == \
+        calibrate_cutpoints(relabelled, target, min_rows=50)
 
 
 def test_calibration_keeps_cutpoints_strictly_decreasing():
     """A non-monotone scorecard inverts the rating scale silently."""
     from models.credit import CUTPOINT_PARAMS, calibrate_cutpoints
-    rows = [{'issuer_credit_score': float(i % 100),
-             'market_bucket': ['AAA', 'AA', 'A', 'BBB', 'BB', 'B'][i % 6]}
-            for i in range(600)]
-    cuts = calibrate_cutpoints(rows, min_per_bucket=10, min_rows=50)
-    values = [cuts[p] for p in CUTPOINT_PARAMS if p in cuts]
+    rows = [{'issuer_credit_score': 50.0}] * 400          # all tied
+    target = {'AAA': 0.1, 'AA': 0.1, 'A': 0.2, 'BBB': 0.2, 'BB': 0.2,
+              'B': 0.1, 'CCC': 0.1}
+    cuts = calibrate_cutpoints(rows, target, min_rows=50)
+    values = [cuts[p] for p in CUTPOINT_PARAMS]
     assert values == sorted(values, reverse=True)
     assert len(set(values)) == len(values)
 
 
 def test_calibration_refuses_a_thin_sample():
     from models.credit import calibrate_cutpoints
-    assert calibrate_cutpoints([{'issuer_credit_score': 50.0,
-                                 'market_bucket': 'A'}] * 10) == {}
+    assert calibrate_cutpoints([{'issuer_credit_score': 50.0}] * 10,
+                               {'A': 1.0}) == {}
+
+
+def test_target_mix_takes_the_ig_hy_split_from_observed_spreads():
+    from models.credit import target_rating_mix
+    oas = {'BBB': 0.0096, 'BB': 0.0165}                  # boundary ~126bp
+    rows = ([{'issuer_credit_score': 50.0, 'z_spread': 0.008,
+              'years_to_maturity': 5.0}] * 70
+            + [{'issuer_credit_score': 30.0, 'z_spread': 0.030,
+                'years_to_maturity': 5.0}] * 30)
+    mix = target_rating_mix(rows, oas, index_mix={
+        'IG': {'A': 0.5, 'BBB': 0.5}, 'HY': {'BB': 0.6, 'B': 0.4}})
+    assert mix['BB'] + mix['B'] == pytest.approx(0.30)
+    assert mix['A'] == pytest.approx(0.35)
+
+
+def test_spread_order_guard_rejects_an_inversion_and_skips_thin_issuers():
+    from models.credit import check_bucket_spread_order
+    cuts = {'credit_cut_aaa': 90, 'credit_cut_aa': 80, 'credit_cut_a': 60,
+            'credit_cut_bbb': 40, 'credit_cut_bb': 20, 'credit_cut_b': 10}
+    def bonds(score, spread, n_issuers, per=5):
+        return [{'issuer_credit_score': score, 'z_spread': spread,
+                 'years_to_maturity': 5.0, 'issuer_ticker': f'T{score}-{i}'}
+                for i in range(n_issuers) for _ in range(per)]
+    healthy = bonds(70, 0.008, 12) + bonds(50, 0.010, 12)
+    assert check_bucket_spread_order(healthy, cuts) == []
+    inverted = bonds(70, 0.012, 12) + bonds(50, 0.010, 12)
+    assert [(a, b) for a, b, *_ in check_bucket_spread_order(inverted, cuts)] \
+        == [('A', 'BBB')]
+    # Four issuers in the better bucket: not evidence either way.
+    few = bonds(95, 0.012, 4) + bonds(85, 0.010, 12)
+    assert check_bucket_spread_order(few, cuts) == []
 
 
 # ---------------------------------------------------------------------------
@@ -750,3 +788,34 @@ def test_drift_on_a_non_aged_price_is_ignored():
     row = {**_aged(20.0, 0.3), 'price_source': 'raw_mark_spread_unsolved'}
     _, reasons = rating_cap_for_row(row)
     assert not any('mark aged' in r for r in reasons)
+
+
+def test_thin_ccc_anchor_is_derived_from_b_at_the_index_ratio():
+    from models.credit import fit_bucket_anchors
+    rows = ([{'implied_bucket': 'B', 'z_spread': 0.0129,
+              'years_to_maturity': 5.0}] * 60
+            + [{'implied_bucket': 'CCC', 'z_spread': 0.05,
+                'years_to_maturity': 5.0}] * 4)
+    fitted = fit_bucket_anchors(rows, bucket_oas={'B': 0.029, 'CCC': 0.1023})
+    assert fitted['CCC'] == pytest.approx(0.0129 * 1023 / 290, rel=1e-3)
+    assert fitted['_meta']['CCC']['derived'] == 'index_ratio'
+
+
+def test_ccc_fits_its_own_anchor_above_the_lower_floor():
+    from models.credit import fit_bucket_anchors
+    rows = ([{'implied_bucket': 'B', 'z_spread': 0.015, 'years_to_maturity': 5.0}] * 60
+            + [{'implied_bucket': 'CCC', 'z_spread': 0.03, 'years_to_maturity': 5.0}] * 20)
+    fitted = fit_bucket_anchors(rows, bucket_oas={'B': 0.029, 'CCC': 0.1023})
+    assert fitted['CCC'] == pytest.approx(0.03)
+    assert 'derived' not in fitted['_meta']['CCC']
+
+
+def test_market_bucket_uses_geometric_midpoints():
+    from models.credit import market_implied_bucket
+    anchors = {'B': 0.0129, 'CCC': 0.045}
+    oas = {}
+    # Boundary sqrt(129 * 450) ~ 241bp.
+    assert market_implied_bucket(0.030, 5.0, oas, bucket_anchors=anchors) == 'CCC'
+    assert market_implied_bucket(0.020, 5.0, oas, bucket_anchors=anchors) == 'B'
+    assert market_implied_bucket(0.060, 5.0, oas, bucket_anchors=anchors) == 'CCC'
+    # Nearest-distance would have called 300bp B (171bp away vs 150bp).

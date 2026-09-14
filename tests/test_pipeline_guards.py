@@ -109,14 +109,16 @@ def test_backtest_anchors_come_from_same_date_peers(monkeypatch):
     import scripts.backtest as bt
     pit = bt.PointInTime()
     monkeypatch.setattr(pit, 'term_points', lambda when: None)
+    monkeypatch.setattr(pit, 'bucket_oas', lambda when: {})     # stay offline
     monkeypatch.setattr('scripts.fit_term_structure.load_tiered', lambda: None)
     when_a, when_b = date(2025, 4, 30), date(2026, 4, 30)
-    rows = ([{'cusip': f'A{i}', 'report_date': when_a} for i in range(60)]
-            + [{'cusip': f'B{i}', 'report_date': when_b} for i in range(60)])
+    rows = ([{'cusip': f'{i:06d}AA1', 'report_date': when_a} for i in range(60)]
+            + [{'cusip': f'{i:06d}BB1', 'report_date': when_b} for i in range(60)])
     spreads = {when_a: 0.010, when_b: 0.020}
     monkeypatch.setattr(bt, '_compute_base_signal', lambda row, p, params: {
         'implied_bucket': 'BBB', 'z_spread': spreads[row['report_date']],
         'years_to_maturity': 5.0})
+    # 60 distinct CUSIP prefixes per date: enough issuers to anchor.
     pit.register(rows)
     assert pit.anchors(when_a, {})['BBB'] == 0.010
     assert pit.anchors(when_b, {})['BBB'] == 0.020

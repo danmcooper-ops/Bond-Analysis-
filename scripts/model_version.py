@@ -14,6 +14,10 @@ gates, caps, scoring, calibration method — and note it below.
     2026.09.13      the post-review model: stale marks judged against the
                     data vintage, field-based coupon units, point-in-time
                     fundamentals, MSPD tranches, vintage-masked issuer gates.
+    2026.09.14      bills calibrated on their own scale; drift cap on aged
+                    prices duration cannot explain; credit cutpoints from the
+                    index rating mix with a spread-order guard, issuer-floored
+                    anchors, derived CCC anchor, geometric market buckets.
 """
 
 import hashlib
@@ -21,7 +25,7 @@ import json
 import os
 import subprocess
 
-MODEL_VERSION = '2026.09.13'
+MODEL_VERSION = '2026.09.14'
 LEGACY_VERSION = 'pre-2026.09.13'
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

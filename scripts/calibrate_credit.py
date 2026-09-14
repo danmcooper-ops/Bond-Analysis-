@@ -4,11 +4,15 @@
     python scripts/calibrate_credit.py output/results_2026-08-06.parquet
     python scripts/calibrate_credit.py output/results_2026-08-06.parquet --apply
 
-The scorecard RANKS credit risk correctly — median observed spread rises
-monotonically across its buckets and the score-to-spread rank correlation is
--0.43. What was wrong was where the cutpoints sat: the seed values assigned
-51% of the universe to high yield when the market prices 23% there, and put
-258 bonds in CCC where the market saw three.
+The scorecard RANKS credit risk; the cutpoints decide where the labels fall.
+They are the score quantiles that reproduce the index rating mix
+(config.INDEX_RATING_MIX), with the IG/HY split measured from this universe's
+own spreads, and --apply refuses any set whose buckets (with at least ten
+issuers) do not widen in median spread from AAA to CCC.
+
+The target used to be the mix of the model's own market buckets, read off
+anchors fitted on its own implied buckets. That loop put ~950 bonds in B at
+a 113bp median against a 290bp index, and four in CCC.
 
 That is not cosmetic. fair_spread multiplies by the bucket's index OAS, so a
 mislabelled BBB is handed a CCC's 1023bp fair spread and reads as absurdly
@@ -25,7 +29,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import json
 
 from models.credit import (CREDIT_BUCKETS, CUTPOINT_PARAMS, calibrate_cutpoints,
-                           fit_bucket_anchors)
+                           check_bucket_spread_order, fit_bucket_anchors,
+                           target_rating_mix)
 from scripts.fit_term_structure import load_fitted, load_tiered
 
 ANCHOR_PATH = os.path.join(
@@ -48,42 +53,51 @@ def load(path):
     return payload.get('results', payload)
 
 
+def load_meta(snapshot_path):
+    """The run_meta beside a results snapshot, {} if absent."""
+    stamp = os.path.basename(snapshot_path)[len('results_'):len('results_') + 10]
+    path = os.path.join(os.path.dirname(os.path.abspath(snapshot_path)),
+                        f'run_meta_{stamp}.json')
+    try:
+        with open(path, encoding='utf-8') as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return {}
+
+
 def _mix(rows, field):
     counts = Counter(r.get(field) for r in rows if r.get(field))
     total = sum(counts.values()) or 1
     return counts, total
 
 
-def report(rows, cuts):
-    scored = [r for r in rows if r.get('issuer_credit_score') is not None
-              and r.get('market_bucket')]
+def report(rows, cuts, target, term_points=None):
+    scored = [r for r in rows if r.get('issuer_credit_score') is not None]
     before, total = _mix(scored, 'implied_bucket')
-    market, _ = _mix(scored, 'market_bucket')
 
-    # Re-bucket every score under the new cutpoints.
-    from models.credit import bucket_from_score
+    # Re-bucket every score under the new cutpoints, and read spreads under
+    # the NEW labels: the old report showed medians of the previous buckets.
+    from models.credit import bucket_from_score, bucket_spread_medians
     after = Counter(bucket_from_score(r['issuer_credit_score'], cuts)
                     for r in scored)
+    medians = bucket_spread_medians(scored, cuts, term_points, min_n=1)
 
-    print(f"\n{'=' * 72}")
+    print(f"\n{'=' * 78}")
     print(f"  CREDIT CUTPOINT CALIBRATION  —  {len(scored):,} scored bonds")
-    print(f"{'=' * 72}")
-    print(f"\n  {'bucket':<7}{'index OAS':>11}{'before':>9}{'market':>9}"
-          f"{'after':>9}   median observed spread")
+    print(f"{'=' * 78}")
+    print(f"\n  {'bucket':<7}{'index OAS':>11}{'target':>9}{'before':>9}"
+          f"{'after':>9}   median de-termed spread (new labels)")
     for bucket in ORDER:
-        med = None
-        subset = [r['z_spread'] for r in scored
-                  if r.get('implied_bucket') == bucket and r.get('z_spread')]
-        if subset:
-            med = sorted(subset)[len(subset) // 2]
-        med_txt = f'{med * 10000:.0f}bp' if med else ''
+        n, med, _ = medians.get(bucket, (0, None, 0))
+        med_txt = f'{med * 10000:.0f}bp' if med is not None else ''
         print(f"  {bucket:<7}{INDEX_OAS_BP[bucket]:>9}bp"
-              f"{before.get(bucket, 0):>9}{market.get(bucket, 0):>9}"
-              f"{after.get(bucket, 0):>9}{med_txt:>15}")
+              f"{round(target.get(bucket, 0) * total):>9}"
+              f"{before.get(bucket, 0):>9}{after.get(bucket, 0):>9}"
+              f"{med_txt:>15}")
 
     hy = ('BB', 'B', 'CCC')
-    print(f"\n  high yield share   before {sum(before.get(b, 0) for b in hy) / total:>6.0%}"
-          f"   market {sum(market.get(b, 0) for b in hy) / total:>6.0%}"
+    print(f"\n  high yield share   target {sum(target.get(b, 0) for b in hy):>6.0%}"
+          f"   before {sum(before.get(b, 0) for b in hy) / total:>6.0%}"
           f"   after {sum(after.get(b, 0) for b in hy) / total:>6.0%}")
 
     print(f"\n  CUTPOINTS")
@@ -142,11 +156,10 @@ def report_anchors(anchors):
         gap = value - INDEX_OAS_BP[bucket]
         print(f"    {bucket:<7}{info['n']:>7}{value:>8.0f}bp"
               f"{INDEX_OAS_BP[bucket]:>10}bp{gap:>+8.0f}")
-    print(f"\n    Investment grade anchors sit WIDER than the index and high")
-    print(f"    yield far TIGHTER, because the model's buckets are not the")
-    print(f"    index's constituents. Pricing one population off the other is")
-    print(f"    what gave Meta's 39-year bond a 41bp fair spread against a")
-    print(f"    143bp market spread.")
+    print(f"\n    Anchors are the model's own bucket medians. High yield sits far")
+    print(f"    tighter than the index because the model's buckets are not the")
+    print(f"    index's constituents. A bucket resting on fewer than ten issuers")
+    print(f"    is not anchored and falls back to the index level.")
 
 
 def write_anchors(anchors):
@@ -181,10 +194,25 @@ def main():
     args = ap.parse_args()
 
     rows = load(args.snapshot)
-    cuts = calibrate_cutpoints(rows)
+    meta = load_meta(args.snapshot)
+    bucket_oas = meta.get('bucket_oas') or {}
+    term_points = load_fitted()
+    target = target_rating_mix(rows, bucket_oas, term_points=term_points)
+    if not target:
+        raise SystemExit('[fatal] no BBB/BB index OAS in the run_meta; cannot '
+                         'set the IG/HY split')
+    cuts = calibrate_cutpoints(rows, target)
     if not cuts:
         raise SystemExit('[fatal] not enough scored rows to calibrate')
-    report(rows, cuts)
+    report(rows, cuts, target, term_points)
+
+    violations = check_bucket_spread_order(rows, cuts, term_points)
+    if violations:
+        print("\n  SPREAD ORDER BROKEN — these buckets do not widen:")
+        for better, worse, a, b in violations:
+            print(f"    {better} {a * 10000:.0f}bp  >=  {worse} {b * 10000:.0f}bp")
+    else:
+        print("\n  Spread order holds: median spread widens bucket by bucket.")
 
     # Anchors are fitted with the NEW cutpoints in force, since the bucket a
     # bond lands in decides which anchor it contributes to.
@@ -196,10 +224,15 @@ def main():
             continue
         rebucketed.append({**row,
                            'implied_bucket': bucket_from_score(score, cuts)})
-    anchors = fit_anchors(rebucketed)
+    anchors = fit_bucket_anchors(rebucketed, term_points=term_points,
+                                 term_by_bucket=load_tiered(),
+                                 bucket_oas=bucket_oas, min_issuers=10)
     report_anchors(anchors)
 
     if args.apply:
+        if violations:
+            raise SystemExit('[fatal] refusing to apply cutpoints whose buckets '
+                             'do not widen in spread order')
         apply(cuts)
         write_anchors(anchors)
     else:

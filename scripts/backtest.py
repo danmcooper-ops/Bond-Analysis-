@@ -248,15 +248,22 @@ class PointInTime:
         """
         if when not in self._anchors:
             from scripts.fit_term_structure import load_tiered
-            base = [_base_signal(row, self, params)
-                    for row in self._population.get(when, {}).values()]
-            rows = [{'implied_bucket': b['implied_bucket'],
-                     'z_spread': b['z_spread'],
-                     'years_to_maturity': b['years_to_maturity']}
-                    for b in base if b is not None]
+            rows = []
+            for row in self._population.get(when, {}).values():
+                b = _base_signal(row, self, params)
+                if b is None:
+                    continue
+                # The CUSIP issuer prefix stands in for the issuer, so the
+                # anchor fit can refuse buckets resting on a few names.
+                rows.append({'implied_bucket': b['implied_bucket'],
+                             'z_spread': b['z_spread'],
+                             'years_to_maturity': b['years_to_maturity'],
+                             'issuer_ticker': row.get('issuer_ticker'),
+                             'cusip': row.get('cusip')})
             fitted = credit.fit_bucket_anchors(
                 rows, term_points=self.term_points(when),
-                term_by_bucket=load_tiered())
+                term_by_bucket=load_tiered(),
+                bucket_oas=self.bucket_oas(when), min_issuers=10)
             self._anchors[when] = ({k: v for k, v in fitted.items()
                                     if not k.startswith('_')} or None)
         return self._anchors[when]

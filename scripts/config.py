@@ -96,15 +96,33 @@ IMPLIED_PRICE_CEIL = 250.0
 # ---------------------------------------------------------------------------
 CREDIT_BUCKETS = ('AAA', 'AA', 'A', 'BBB', 'BB', 'B', 'CCC')
 
-# Score cutpoints, high to low. Calibrated monthly against the market: the
-# cutpoints are chosen so each implied bucket's median observed Z-spread lines
-# up with the FRED bucket OAS + fitted wedge. These are the seed values.
+# Score cutpoints, high to low. Written by scripts/calibrate_credit.py: they are
+# the credit-score quantiles that reproduce INDEX_RATING_MIX, subject to each
+# bucket's median observed spread widening from AAA to CCC.
 CREDIT_CUT_AAA = 57.6
 CREDIT_CUT_AA = 50.5
 CREDIT_CUT_A = 44.7
 CREDIT_CUT_BBB = 42.1
 CREDIT_CUT_BB = 38.0
 CREDIT_CUT_B = 9.4
+
+# The rating mix the cutpoints reproduce. EXTERNAL on purpose: the previous
+# target was the model's own market_bucket counts, which came from anchors
+# fitted on the model's own buckets, so calibration chased its own tail and
+# piled ~950 bonds into B (median 113bp against a 290bp index) with 4 in CCC.
+#
+# Within-class shares: credit-quality breakdown of the two largest index
+# trackers, as of 2026-09-10, renormalised over rated bonds only.
+#   IG  iShares LQD: AAA 0.98, AA 12.00, A 46.58, BBB 39.96 (cash 0.48)
+#   HY  iShares HYG: BB 57.74, B 31.93, CCC 7.58 + CC 0.35 + D 0.46
+#       (BBB 0.99, NR 0.59, cash 0.36 excluded)
+# The IG/HY split is NOT taken from the index: this universe is what funds
+# hold, not what the index holds. It is measured from observed de-termed
+# spreads against the BBB/BB index OAS boundary (models/credit.py).
+INDEX_RATING_MIX = {
+    'IG': {'AAA': 0.0098, 'AA': 0.1206, 'A': 0.4681, 'BBB': 0.4015},
+    'HY': {'BB': 0.5888, 'B': 0.3256, 'CCC': 0.0856},
+}
 
 # Issuer scorecard: (field, worst, best, weight).
 #

@@ -21,11 +21,12 @@ it came from 4.2x coverage and 2.1x leverage, rather than from a fitted
 surface nobody can inspect.
 
 CALIBRATED AGAINST THE MARKET, NOT AGAINST AGENCY RATINGS, because there are
-no free agency ratings. The cutpoints are chosen so each implied bucket's
-median observed spread lines up with the published bucket OAS. That makes the
-implied bucket mean "where the market prices issuers that look like this",
-which is exactly the reference the mispricing signal needs — and it is
-self-consistent rather than borrowed.
+no free agency ratings. The cutpoints reproduce the index rating mix
+(config.INDEX_RATING_MIX within IG and HY, with this universe's own IG/HY
+split measured from spreads), and calibration refuses a set whose buckets do
+not widen in median spread from AAA to CCC. The target is external on
+purpose: it used to be the model's own market buckets, which made calibration
+circular.
 
 WHAT DIVERGENCE IS, AND ITS FAILURE MODE
 -----------------------------------------
@@ -318,18 +319,29 @@ def market_implied_bucket(observed_z, maturity_years, bucket_oas,
     """
     if observed_z is None:
         return None
-    best, best_gap = None, None
+    levels = []
     for bucket in CREDIT_BUCKETS:
         implied = fair_spread(bucket, maturity_years, bucket_oas,
                               term_points=term_points, wedge=wedge, beta=beta,
                               term_by_bucket=term_by_bucket,
                               bucket_anchors=bucket_anchors)
-        if implied is None:
+        if implied is None or implied <= 0:
             continue
-        gap = abs(observed_z - implied)
-        if best_gap is None or gap < best_gap:
-            best, best_gap = bucket, gap
-    return best
+        # Per-tier term curves can cross at long tenors (a mid-tier BBB above
+        # a wide-tier BB); a running maximum keeps the ladder monotone.
+        if levels:
+            implied = max(implied, levels[-1][1])
+        levels.append((bucket, implied))
+    if not levels:
+        return None
+    # Boundaries at the GEOMETRIC midpoint between neighbouring buckets.
+    # Nearest absolute distance put the B/CCC boundary halfway between 129bp
+    # and 1023bp, so everything up to ~575bp read as B; spreads are
+    # multiplicative, and the geometric midpoint splits the ladder evenly.
+    for (bucket, level), (_, next_level) in zip(levels, levels[1:]):
+        if observed_z <= math.sqrt(level * next_level):
+            return bucket
+    return levels[-1][0]
 
 
 def divergence(fundamental_bucket, market_bucket, fundamentals_asof=None,
@@ -385,61 +397,73 @@ def bucket_trend(score_now, score_prior, years=1.0):
 # Calibration
 # ---------------------------------------------------------------------------
 
-def calibrate_cutpoints(rows, min_per_bucket=25, min_rows=300):
-    """Place the cutpoints so the model's bucket mix matches the market's.
+def _determed(row, term_points=None, term_by_bucket=None, bucket=None):
+    """Observed Z-spread divided by its term factor, or None."""
+    spread, tenor = row.get('z_spread'), row.get('years_to_maturity')
+    if spread is None or tenor is None:
+        return None
+    points = (term_by_bucket or {}).get(bucket) if bucket else None
+    points = points or term_points
+    if not points:
+        return spread
+    from data.fred_client import term_factor_at
+    return spread / max(term_factor_at(points, tenor), 0.2)
 
-    WHY THE SEED VALUES WERE WRONG, AND WHY IT WAS NOT THE SCORE'S FAULT.
-    The scorecard ranks credit risk correctly: median observed spread rises
-    monotonically across its buckets (51, 61, 71, 73, 94, 102, 120bp) and the
-    score-to-spread rank correlation is -0.43. What was broken was where the
-    cutpoints sat. The seeds (88/78/66/52/38/24) split a roughly uniform score
-    distribution into sevenths, which assigned 51% of the universe to high
-    yield when the market prices only 23% there — and put 258 bonds in CCC,
-    where the market saw three. Those "CCC" bonds trade at 120bp. The real
-    CCC index is 1023bp. The model was calling ordinary investment-grade
-    credits distressed.
 
-    A ranking that is right with labels that are wrong is worse than useless,
-    because every downstream consumer reads the label: fair_spread multiplies
-    by the bucket's index OAS, so a mislabelled BBB gets a CCC's 1023bp fair
-    spread and looks absurdly rich.
+def target_rating_mix(rows, bucket_oas, term_points=None, index_mix=None):
+    """{bucket: share} this universe should reproduce.
 
-    THE METHOD is distribution matching against the market's own opinion.
-    Each bond's market-implied bucket is read from its own spread, giving the
-    mix the market actually prices. The cutpoints are then the corresponding
-    quantiles of the credit-score distribution. The result is a scorecard
-    whose "BBB" means what the market means by BBB — self-consistent, and
-    built from free data alone.
-
-    Deliberately NOT fitted to forward returns. This aligns the LABELS with
-    market convention; whether the ranking predicts returns is a separate
-    question the backtest asks, and conflating the two would let a
-    return-fitted cutpoint smuggle in look-ahead.
+    Within investment grade and within high yield the shares are the index's
+    (INDEX_RATING_MIX). The IG/HY SPLIT is this universe's own: the share of
+    scored bonds whose de-termed spread sits beyond the BBB/BB boundary, the
+    geometric midpoint of the two index OAS levels. Taking the split from the
+    index would impose the index's composition on a fund-held universe that is
+    measurably different; taking the within-class shares from our own buckets
+    is the circularity this replaces.
     """
-    scored = [r for r in rows
-              if r.get('issuer_credit_score') is not None
-              and r.get('market_bucket')]
-    if len(scored) < min_rows:
+    from scripts.config import INDEX_RATING_MIX
+    index_mix = index_mix or INDEX_RATING_MIX
+    bbb, bb = (bucket_oas or {}).get('BBB'), (bucket_oas or {}).get('BB')
+    if not bbb or not bb:
         return {}
+    boundary = math.sqrt(bbb * bb)
+    spreads = [_determed(r, term_points) for r in rows
+               if r.get('issuer_credit_score') is not None]
+    spreads = [x for x in spreads if x is not None]
+    if not spreads:
+        return {}
+    hy_share = sum(1 for x in spreads if x > boundary) / len(spreads)
+    mix = {b: w * (1.0 - hy_share) for b, w in index_mix['IG'].items()}
+    mix.update({b: w * hy_share for b, w in index_mix['HY'].items()})
+    return mix
 
-    # The mix the market prices, as shares.
-    counts = {}
-    for row in scored:
-        counts[row['market_bucket']] = counts.get(row['market_bucket'], 0) + 1
-    total = len(scored)
 
-    scores = sorted(r['issuer_credit_score'] for r in scored)
+def calibrate_cutpoints(rows, target_mix, min_rows=300):
+    """Place the cutpoints so the model's bucket mix reproduces `target_mix`.
 
-    # Walk best to worst, accumulating share, and read the score quantile at
-    # each boundary. Scores are ordered ascending, so the AAA boundary sits at
-    # the TOP of the distribution.
+    The scorecard RANKS issuers; the cutpoints only decide where the labels
+    fall. Each cutpoint is the credit-score quantile at the cumulative target
+    share, walking best to worst, so the implied mix matches the target by
+    construction.
+
+    THE TARGET IS EXTERNAL. It used to be the mix of each bond's
+    market_bucket — read off anchors fitted on the model's own implied
+    buckets, which were set by the previous cutpoints. Calibration therefore
+    chased its own tail: ~950 bonds ended in B at a 113bp median against a
+    290bp index, and CCC held four. See target_rating_mix().
+
+    Deliberately NOT fitted to forward returns: this aligns labels, and a
+    return-fitted cutpoint would smuggle in look-ahead.
+    """
+    scores = sorted(r['issuer_credit_score'] for r in rows
+                    if r.get('issuer_credit_score') is not None)
+    if len(scores) < min_rows or not target_mix:
+        return {}
+    total = sum(target_mix.get(b, 0.0) for b in CREDIT_BUCKETS) or 1.0
+
     out, cumulative = {}, 0.0
     for bucket, param in zip(CREDIT_BUCKETS[:-1], CUTPOINT_PARAMS):
-        cumulative += counts.get(bucket, 0) / total
-        if counts.get(bucket, 0) < min_per_bucket:
-            # Too thin to place a boundary on; leave it to the monotonicity
-            # pass below rather than fitting a cutpoint to a handful of bonds.
-            continue
+        cumulative += target_mix.get(bucket, 0.0) / total
         index = int(round((1.0 - cumulative) * (len(scores) - 1)))
         out[param] = round(scores[max(0, min(index, len(scores) - 1))], 1)
 
@@ -447,17 +471,67 @@ def calibrate_cutpoints(rows, min_per_bucket=25, min_rows=300):
     # rather than letting validate_params reject the whole set later.
     ordered, ceiling = {}, 100.0
     for param in CUTPOINT_PARAMS:
-        value = out.get(param)
-        if value is None:
-            continue
-        value = min(value, ceiling - 0.5)
+        value = min(out[param], ceiling - 0.1)
         ordered[param] = round(value, 1)
         ceiling = value
     return ordered
 
 
+def _issuer_key(row):
+    return row.get('issuer_ticker') or (row.get('cusip') or '')[:6] or None
+
+
+def bucket_spread_medians(rows, cuts, term_points=None, min_n=10,
+                          min_issuers=1):
+    """{bucket: (n_bonds, median de-termed spread, n_issuers)} under `cuts`.
+
+    Buckets with fewer than `min_n` bonds or `min_issuers` distinct issuers
+    are omitted.
+    """
+    by_bucket, issuers = {}, {}
+    for row in rows:
+        score = row.get('issuer_credit_score')
+        if score is None:
+            continue
+        spread = _determed(row, term_points)
+        if spread is None:
+            continue
+        bucket = bucket_from_score(score, cuts)
+        by_bucket.setdefault(bucket, []).append(spread)
+        issuers.setdefault(bucket, set()).add(_issuer_key(row))
+    out = {}
+    for bucket in CREDIT_BUCKETS:
+        values = sorted(by_bucket.get(bucket, []))
+        n_issuers = len(issuers.get(bucket, set()) - {None})
+        if len(values) >= min_n and n_issuers >= min_issuers:
+            out[bucket] = (len(values), values[len(values) // 2], n_issuers)
+    return out
+
+
+def check_bucket_spread_order(rows, cuts, term_points=None, min_n=10,
+                              min_issuers=10):
+    """Adjacent bucket pairs whose median spread does not widen. [] is healthy.
+
+    A label mix can match the index while the scorecard fails to separate two
+    grades; this is the check that the labels still MEAN something about risk.
+
+    Only buckets with at least `min_issuers` distinct issuers are compared. A
+    median over a handful of issuers measures those issuers: on 2026-09-13
+    the AAA bucket was four names (Amazon, Meta, Nvidia, Microsoft), trading
+    wide on heavy AI-capex issuance, and "AAA wider than AA" was an issuer
+    effect, not a scorecard failure.
+    """
+    medians = bucket_spread_medians(rows, cuts, term_points, min_n, min_issuers)
+    present = [b for b in CREDIT_BUCKETS if b in medians]
+    return [(a, b, medians[a][1], medians[b][1])
+            for a, b in zip(present, present[1:])
+            if not medians[b][1] > medians[a][1]]
+
+
 def fit_bucket_anchors(rows, term_points=None, term_by_bucket=None,
-                       min_per_bucket=50, reference_years=5.0):
+                       min_per_bucket=50, reference_years=5.0,
+                       min_per_bucket_ccc=15, bucket_oas=None,
+                       min_issuers=0):
     """Median spread of each bucket's own members, de-termed to a reference tenor.
 
     Each observed spread is divided by its own term factor before the median
@@ -473,7 +547,7 @@ def fit_bucket_anchors(rows, term_points=None, term_by_bucket=None,
     """
     from data.fred_client import term_factor_at
 
-    by_bucket = {}
+    by_bucket, issuers = {}, {}
     for row in rows:
         bucket = row.get('implied_bucket')
         spread = row.get('z_spread')
@@ -487,11 +561,20 @@ def fit_bucket_anchors(rows, term_points=None, term_by_bucket=None,
         # A near-zero factor would explode the de-termed value; the floor is a
         # guard against a degenerate fitted curve, not a tuning knob.
         by_bucket.setdefault(bucket, []).append(spread / max(factor, 0.2))
+        issuers.setdefault(bucket, set()).add(_issuer_key(row))
 
     anchors, meta = {}, {}
     for bucket, values in by_bucket.items():
-        if len(values) < min_per_bucket:
+        # CCC is thin by nature (~8% of high yield), so it gets a lower floor.
+        floor = min_per_bucket_ccc if bucket == 'CCC' else min_per_bucket
+        if len(values) < floor:
             meta[bucket] = {'n': len(values), 'used': False}
+            continue
+        # A median over a few issuers anchors those issuers, not the grade.
+        n_issuers = len(issuers.get(bucket, set()) - {None})
+        if n_issuers < min_issuers:
+            meta[bucket] = {'n': len(values), 'used': False,
+                            'dropped': f'only {n_issuers} issuers'}
             continue
         values.sort()
         anchors[bucket] = round(values[len(values) // 2], 6)
@@ -512,6 +595,17 @@ def fit_bucket_anchors(rows, term_points=None, term_by_bucket=None,
             continue
         ordered[bucket] = value
         floor = value
+
+    # No fitted CCC: derive it from the B anchor at the index's own CCC/B
+    # ratio. Falling back to the raw 1023bp index left a ~900bp gap above B,
+    # and every spread in it was labelled B.
+    if ('CCC' not in ordered and ordered.get('B') and bucket_oas
+            and bucket_oas.get('B') and bucket_oas.get('CCC')):
+        derived = round(ordered['B'] * bucket_oas['CCC'] / bucket_oas['B'], 6)
+        if derived > ordered['B']:
+            ordered['CCC'] = derived
+            meta['CCC'] = {**meta.get('CCC', {'n': 0}), 'used': True,
+                           'anchor': derived, 'derived': 'index_ratio'}
 
     ordered['_meta'] = meta
     ordered['_reference_years'] = reference_years
