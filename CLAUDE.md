@@ -146,3 +146,49 @@ Use the Claude scheduled-task mechanism, **not launchd**. A launchd-spawned
 git/python cannot reach a repo under the TCC-protected `~/Desktop` — the
 Real-Estate-Model repo documents this lesson; inherit it rather than
 rediscovering it.
+
+The task definition lives in `scheduling/daily-bond-analysis.SKILL.md`; keep
+`~/.claude/scheduled-tasks/daily-bond-analysis/SKILL.md` identical to it. The
+desktop app stores the task's **working folder and approved Bash rules**
+separately, in its own `scheduled-tasks.json`. Two failures came from there,
+not from this code:
+
+- **A deleted working folder skips the run silently.** 2026-09-10 and -11 were
+  skipped with `cwd no longer exists: ~/Desktop/Workspace Folder` in
+  `~/Library/Logs/Claude/main.log`. Change the folder in the app, never by
+  editing the JSON while the app runs.
+- **An unapproved command stalls the run until someone clicks.** 2026-09-09
+  waited from 07:03 to 15:05 on a Bash prompt. When a step's command changes,
+  run the task once by hand and choose always-allow.
+
+When `daily_checks.py gaps` reports a missed run, grep
+`~/Library/Logs/Claude/main.log` for `daily-bond-analysis` around 07:00 of that
+day before suspecting the pipeline.
+
+## Snapshot versions
+
+Every `run_meta_*.json` carries `model_version`, `git_sha`, `params_hash` and
+fingerprints of the calibration files (`scripts/model_version.py`). Bump
+`MODEL_VERSION` whenever a change moves ratings for unchanged inputs, and note
+it in that module's docstring. `daily_checks.py ratings` skips the drift check
+across a version change instead of alerting on the model's own move.
+
+## New N-PORT quarter
+
+`daily_checks.py nport` alerts when DERA publishes a quarter not yet ingested.
+Then, reviewing each report before applying the next step:
+
+```bash
+python scripts/ingest_nport.py --quarter 2026q3     # ~5 min from cache; downloads ~440 MB otherwise
+python scripts/build_universe.py --quarter 2026q3
+python scripts/fit_term_structure.py                 # review, then --apply
+python scripts/analyze_bonds.py
+python scripts/calibrate_credit.py output/results_<today>.parquet    # review, then --apply
+python scripts/analyze_bonds.py
+python scripts/calibrate_thresholds.py output/results_<today>.parquet  # review, then --apply
+python scripts/analyze_bonds.py
+```
+
+`calibrate_credit --apply` refuses cutpoints whose buckets do not widen in
+spread; if it refuses, investigate the scorecard rather than forcing it.
+`ingest_nport.py` prunes older ZIPs whose marks already exist.

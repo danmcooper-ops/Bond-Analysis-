@@ -35,8 +35,8 @@ RATING_THRESHOLDS_BY_CLASS = {
     'TREASURY': {'buy': 73.0, 'lean': 65.4, 'pass': 55.9},
     'TREASURY_BILL': {'buy': 57.3, 'lean': 53.0, 'pass': 44.8},
     'AGENCY': {},
-    'CORP_IG': {'buy': 65.9, 'lean': 44.3, 'pass': 32.0},
-    'CORP_HY': {'buy': 67.6, 'lean': 54.7, 'pass': 37.0},
+    'CORP_IG': {'buy': 65.4, 'lean': 45.1, 'pass': 32.3},
+    'CORP_HY': {'buy': 67.9, 'lean': 55.6, 'pass': 37.4},
 }
 
 # ---------------------------------------------------------------------------
@@ -100,11 +100,11 @@ CREDIT_BUCKETS = ('AAA', 'AA', 'A', 'BBB', 'BB', 'B', 'CCC')
 # the credit-score quantiles that reproduce INDEX_RATING_MIX, subject to each
 # bucket's median observed spread widening from AAA to CCC.
 CREDIT_CUT_AAA = 99.0
-CREDIT_CUT_AA = 83.8
-CREDIT_CUT_A = 51.1
-CREDIT_CUT_BBB = 32.9
-CREDIT_CUT_BB = 23.9
-CREDIT_CUT_B = 17.9
+CREDIT_CUT_AA = 82.1
+CREDIT_CUT_A = 51.9
+CREDIT_CUT_BBB = 33.2
+CREDIT_CUT_BB = 23.4
+CREDIT_CUT_B = 11.9
 
 # The rating mix the cutpoints reproduce. EXTERNAL on purpose: the previous
 # target was the model's own market_bucket counts, which came from anchors
