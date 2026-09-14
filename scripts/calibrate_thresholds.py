@@ -38,7 +38,19 @@ from scripts.param_set import ASSET_CLASSES
 # actionable list, not a ranking with a generous top band.
 DEFAULT_TARGET = {'BUY': 0.03, 'LEAN BUY': 0.22, 'HOLD': 0.50, 'PASS': 0.25}
 
+# Per-class target overrides. Bills are near-identical cash substitutes: the
+# question they answer is "cash or not", and the inside-6-months cap already
+# makes most of them HOLD. Forcing 3% of them to BUY would crown whichever bill
+# a pricing-service rounding happened to favour. No BUY; a small LEAN band for
+# the bills that genuinely yield above the 3m point.
+CLASS_TARGETS = {
+    'treasury_bill': {'BUY': 0.0, 'LEAN BUY': 0.10, 'HOLD': 0.65, 'PASS': 0.25},
+}
+
 MIN_ROWS = 30
+
+# A BUY cut above every observed score, for a class whose target has no BUY.
+UNREACHABLE_MARGIN = 0.1
 
 
 def _quantile(sorted_values, q):
@@ -71,8 +83,12 @@ def thresholds_for(scores, target=None):
     buy = target['BUY']
     lean = buy + target['LEAN BUY']
     hold = lean + target['HOLD']
+    # The 1.0 quantile is the maximum score, which one row always reaches; a
+    # zero-BUY target needs a cut strictly above it.
+    buy_cut = (values[-1] + UNREACHABLE_MARGIN if buy <= 0
+               else _quantile(values, 1.0 - buy))
     return {
-        'buy': round(_quantile(values, 1.0 - buy), 1),
+        'buy': round(buy_cut, 1),
         'lean': round(_quantile(values, 1.0 - lean), 1),
         'pass': round(_quantile(values, 1.0 - hold), 1),
     }
@@ -81,7 +97,12 @@ def thresholds_for(scores, target=None):
 def _class_key(asset_class):
     """Map an asset class onto its param-set suffix."""
     cls = (asset_class or '').lower()
-    if cls.startswith('treasury'):
+    # Bills and coupon Treasuries score on different scales: bills have no
+    # roll-down or carry gates and a single cashflow. Pooled, the note/bond
+    # cuts landed on bills and left 84% of them PASS.
+    if cls == 'treasury_bill':
+        return 'treasury_bill'
+    if cls == 'treasury':
         return 'treasury'
     if cls == 'agency':
         return 'agency'
@@ -133,7 +154,7 @@ def main():
         scores = by_class.get(key, [])
         if not scores:
             continue
-        cuts = thresholds_for(scores, target)
+        cuts = thresholds_for(scores, CLASS_TARGETS.get(key, target))
         if cuts is None:
             print(f"  {key:<10} {len(scores):>5} rows — too few to calibrate "
                   f"(need {MIN_ROWS}); falls back to the base thresholds")
@@ -191,11 +212,6 @@ def _apply(results):
                         f"'lean': {cuts['lean']}, 'pass': {cuts['pass']}}},")
         else:
             body.append(f"    '{upper}': {{}},")
-    # TREASURY_BILL shares the Treasury scale: same gates, same construction.
-    if 'treasury' in results:
-        cuts = results['treasury']
-        body.append(f"    'TREASURY_BILL': {{'buy': {cuts['buy']}, "
-                    f"'lean': {cuts['lean']}, 'pass': {cuts['pass']}}},")
     body.append('}')
     replacement = '\n'.join(body)
 

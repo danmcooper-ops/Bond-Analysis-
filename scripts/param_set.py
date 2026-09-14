@@ -36,7 +36,7 @@ CATEGORY_WEIGHT_KEYS = (
     'score_weight_structure', 'score_weight_liquidity',
 )
 
-ASSET_CLASSES = ('treasury', 'agency', 'corp_ig', 'corp_hy')
+ASSET_CLASSES = ('treasury', 'treasury_bill', 'agency', 'corp_ig', 'corp_hy')
 
 # Highest to lowest. Used by validate_params to enforce monotone cutpoints —
 # a non-monotone credit scorecard would silently invert the rating scale.

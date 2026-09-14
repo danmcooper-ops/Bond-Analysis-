@@ -120,3 +120,25 @@ def test_backtest_anchors_come_from_same_date_peers(monkeypatch):
     pit.register(rows)
     assert pit.anchors(when_a, {})['BBB'] == 0.010
     assert pit.anchors(when_b, {})['BBB'] == 0.020
+
+
+# --- bills calibrate on their own scale ---------------------------------------
+
+def test_bills_and_coupon_treasuries_calibrate_independently():
+    from scripts.calibrate_thresholds import CLASS_TARGETS, _class_key, thresholds_for
+    assert _class_key('TREASURY_BILL') == 'treasury_bill'
+    assert _class_key('TREASURY') == 'treasury'
+    bills = [40.0 + i * 0.1 for i in range(50)]
+    cuts = thresholds_for(bills, CLASS_TARGETS['treasury_bill'])
+    assert cuts['buy'] > max(bills)                       # no bill can be BUY
+    assert cuts['buy'] > cuts['lean'] > cuts['pass']
+
+
+def test_a_bill_param_override_reaches_bill_rows():
+    from scripts.param_set import merge_params
+    from scripts.scoring_kernel import rating_from_composite
+    params = merge_params({'rating_threshold_buy_treasury_bill': 10.0,
+                           'rating_threshold_lean_treasury_bill': 5.0,
+                           'rating_threshold_pass_treasury_bill': 1.0})
+    assert rating_from_composite(12.0, params, asset_class='TREASURY_BILL') == 'BUY'
+    assert rating_from_composite(12.0, params, asset_class='TREASURY') != 'BUY'
