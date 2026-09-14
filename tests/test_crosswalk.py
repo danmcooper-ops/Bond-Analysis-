@@ -357,3 +357,28 @@ def test_fundamentals_struck_after_the_mark_are_refused():
     row = {}
     assert fund.attach(row, {'key': 'ACME'}, date(2026, 7, 31)) is True
     assert row['_fundamentals_age_days'] == 31
+
+
+def test_equity_backend_reads_gzipped_snapshots_point_in_time(tmp_path):
+    import gzip
+    import json
+    from datetime import date
+
+    from data.issuer_fundamentals import EquitySnapshotBackend
+
+    def write(name, ticker, gz):
+        payload = {'date': name[8:18], 'results': [
+            {'ticker': ticker, 'company_name': ticker, 'int_cov': 4.0}]}
+        path = tmp_path / name
+        if gz:
+            with gzip.open(path, 'wt', encoding='utf-8') as fh:
+                json.dump(payload, fh)
+        else:
+            path.write_text(json.dumps(payload))
+
+    write('results_2026-04-20.json.gz', 'OLD', gz=True)
+    write('results_2026-09-11.json', 'NEW', gz=False)
+    older = EquitySnapshotBackend(snapshot_dir=str(tmp_path), as_of=date(2026, 4, 30))
+    assert list(older.load()) == ['OLD']
+    newer = EquitySnapshotBackend(snapshot_dir=str(tmp_path), as_of=date(2026, 9, 12))
+    assert list(newer.load()) == ['NEW']

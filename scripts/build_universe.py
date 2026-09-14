@@ -31,11 +31,13 @@ from datetime import date, datetime
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from data.cusip_crosswalk import CusipCrosswalk
-from data.issuer_fundamentals import IssuerFundamentals
+from data.issuer_fundamentals import (EquitySnapshotBackend, IssuerFundamentals,
+                                      SECXBRLBackend)
 from data.logging_setup import get_logger
 from data.nport_client import NPORTClient
 from data.nport_consensus import latest_marks
-from scripts.config import (MIN_FUNDS_HOLDING, MIN_TOTAL_HELD_USD,
+from scripts.config import (MIN_CUSIP_MATCH_CONFIDENCE, MIN_FUNDS_HOLDING,
+                            MIN_TOTAL_HELD_USD,
                             MIN_YEARS_TO_MATURITY, PRICE_SANITY_MAX,
                             PRICE_SANITY_MIN)
 
@@ -85,6 +87,8 @@ def group_by_issuer(marks):
 def load_sec_filers():
     """[(ticker, title)] for every SEC filer, from company_tickers.json.
 
+    The CIKs from the same file come back through load_sec_cik_map().
+
     A SECOND index, behind the fundamentals one. Its only job is to tell
     "we cannot identify this issuer" apart from "we identified it and hold no
     financials" — two outcomes that look identical on a bond row but need
@@ -117,6 +121,8 @@ def load_sec_filers():
             with open(path + '.tmp', 'w', encoding='utf-8') as fh:
                 json.dump(payload, fh)
             os.replace(path + '.tmp', path)
+    global _SEC_FILERS_PAYLOAD
+    _SEC_FILERS_PAYLOAD = payload
     if not payload:
         log.warning('company_tickers.json unavailable; cannot distinguish '
                     '"no fundamentals" from "unidentified issuer"')
@@ -125,7 +131,21 @@ def load_sec_filers():
             if v.get('ticker') and v.get('title')]
 
 
-def build(quarter, as_of, min_funds, min_held, audit=0):
+_SEC_FILERS_PAYLOAD = None
+
+
+def load_sec_cik_map():
+    """{ticker: cik} from the company_tickers.json load_sec_filers() read."""
+    payload = _SEC_FILERS_PAYLOAD
+    if payload is None:
+        load_sec_filers()
+        payload = _SEC_FILERS_PAYLOAD
+    return {v['ticker'].strip().upper(): int(v['cik_str'])
+            for v in (payload or {}).values()
+            if v.get('ticker') and v.get('cik_str') is not None}
+
+
+def build(quarter, as_of, min_funds, min_held, audit=0, no_xbrl=False):
     marks = load_marks(quarter)
     corporates = [m for m in marks if m.get('issuer_type') in CORPORATE_ISSUER_TYPES]
     log.info('%s: %d corporate CUSIPs after de-duplicating to the latest month',
@@ -146,7 +166,6 @@ def build(quarter, as_of, min_funds, min_held, audit=0):
     # of that row's own mark date (below): one snapshot for the whole quarter
     # attached fundamentals up to 211 days newer than a row's price.
     fundamentals = IssuerFundamentals(as_of=fundamentals_asof)
-    fundamentals_by_date = {fundamentals_asof: fundamentals}
     crosswalk = CusipCrosswalk(index=fundamentals.names())
     filer_crosswalk = CusipCrosswalk(index=load_sec_filers())
 
@@ -166,6 +185,31 @@ def build(quarter, as_of, min_funds, min_held, audit=0):
                 'filer_method': fallback.get('method'),
                 'matched_name': fallback.get('matched_name'),
             })
+            # A confident filer match is a real identification: promote it,
+            # so the SEC XBRL backend can supply the fundamentals and the row
+            # keeps its match confidence instead of reading 0.0.
+            if (not no_xbrl and fallback.get('confidence', 0.0)
+                    >= MIN_CUSIP_MATCH_CONFIDENCE):
+                resolution.update({
+                    'key': fallback['key'],
+                    'method': f"filer_xbrl:{fallback.get('method')}",
+                    'confidence': fallback.get('confidence'),
+                })
+
+    # The equity snapshot first, SEC XBRL for the promoted filers behind it,
+    # both pinned to each row's own mark date.
+    xbrl_tickers = sorted({r['key'] for r in resolutions.values()
+                           if str(r.get('method', '')).startswith('filer_xbrl')})
+    cik_map = load_sec_cik_map() if xbrl_tickers else {}
+    log.info('SEC XBRL: %d filer issuers promoted for fundamentals',
+             len(xbrl_tickers))
+
+    def fundamentals_for(when):
+        return IssuerFundamentals(backends=[
+            EquitySnapshotBackend(as_of=when),
+            SECXBRLBackend(tickers=xbrl_tickers, cik_map=cik_map, as_of=when)])
+
+    fundamentals_by_date = {}
 
     rows = []
     filtered = Counter()
@@ -213,8 +257,7 @@ def build(quarter, as_of, min_funds, min_held, audit=0):
         resolution = resolutions.get(mark['cusip'][:6].upper(), {})
         dated = fundamentals_by_date.get(report_date)
         if dated is None:
-            dated = fundamentals_by_date[report_date] = \
-                IssuerFundamentals(as_of=report_date)
+            dated = fundamentals_by_date[report_date] = fundamentals_for(report_date)
         dated.attach(row, resolution, report_date)
         rows.append(row)
 
@@ -259,10 +302,14 @@ def report(rows, groups, resolutions, fundamentals, filtered, audit):
                           ('unresolved issuer name', unresolved)):
         n, pct = share(subset)
         print(f"    {label:<32}{n:>8,} bonds{pct:>8.1f}%")
-    print(f"\n    Only the middle band is a fetching problem — those issuers "
-          f"file with the\n    SEC and a XBRL backend would recover them. The "
-          f"third is the hard residual:\n    private issuers, foreign banks, "
-          f"and structures with no US filing behind them.")
+    for source in ('equity_snapshot', 'sec_xbrl'):
+        n, pct = share([r for r in with_fund
+                        if r.get('_fundamentals_source') == source])
+        print(f"      from {source:<25}{n:>8,} bonds{pct:>8.1f}%")
+    print(f"\n    The middle band is filers whose facts could not be derived "
+          f"(no CIK,\n    no XBRL facts, or no usable fields). The third is the "
+          f"hard residual:\n    private issuers, foreign banks, and structures "
+          f"with no US filing behind them.")
 
     # -- confidence ---------------------------------------------------------
     print(f"\n  MATCH CONFIDENCE")
@@ -348,10 +395,12 @@ def main():
     ap.add_argument('--audit', type=int, default=0,
                     help='print N random matches for hand-checking')
     ap.add_argument('--no-write', action='store_true')
+    ap.add_argument('--no-xbrl', action='store_true',
+                    help='skip SEC XBRL fundamentals for filer-only issuers')
     args = ap.parse_args()
 
     rows = build(args.quarter, args.as_of, args.min_funds, args.min_held,
-                 audit=args.audit)
+                 audit=args.audit, no_xbrl=args.no_xbrl)
     if not rows:
         raise SystemExit('[fatal] empty universe')
 

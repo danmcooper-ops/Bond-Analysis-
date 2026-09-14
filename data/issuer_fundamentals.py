@@ -88,8 +88,14 @@ class EquitySnapshotBackend:
     def _snapshot_path(self):
         if not os.path.isdir(self.snapshot_dir):
             return None
-        paths = sorted(glob.glob(os.path.join(self.snapshot_dir,
-                                              'results_*.json')))
+        # The equity model gzips older snapshots (results_<date>.json.gz) and
+        # keeps only recent ones plain. Globbing *.json alone silently found
+        # nothing before the newest few days, so every point-in-time lookup
+        # for a months-old mark came back empty.
+        paths = sorted(glob.glob(os.path.join(self.snapshot_dir, 'results_*.json'))
+                       + glob.glob(os.path.join(self.snapshot_dir,
+                                                'results_*.json.gz')),
+                       key=os.path.basename)
         if not paths:
             return None
         if self.as_of is None:
@@ -119,9 +125,14 @@ class EquitySnapshotBackend:
             return self._rows
 
         try:
-            with open(path, encoding='utf-8') as fh:
-                payload = json.load(fh)
-        except (OSError, ValueError) as exc:
+            if path.endswith('.gz'):
+                import gzip
+                with gzip.open(path, 'rt', encoding='utf-8') as fh:
+                    payload = json.load(fh)
+            else:
+                with open(path, encoding='utf-8') as fh:
+                    payload = json.load(fh)
+        except (OSError, ValueError, EOFError) as exc:
             log.error('Could not read %s: %s', path, exc)
             self._rows = {}
             return self._rows
@@ -168,27 +179,130 @@ class EquitySnapshotBackend:
 
 
 class SECXBRLBackend:
-    """Placeholder for issuers that file with the SEC but are outside the
-    equity universe — 19.5% of held value on 2026Q2.
+    """Fundamentals from SEC XBRL company facts, for known filers only.
 
-    Deliberately NOT half-implemented. Fetching company facts per CIK and
-    deriving coverage, leverage and Altman-Z from raw XBRL is the equity
-    model's `sec_xbrl_client` plus a slice of its analytics, and a partial
-    version would silently produce fundamentals of a different quality from
-    the equity path while looking identical downstream. Until it exists these
-    issuers correctly report no fundamentals and lose their credit gates.
+    Covers issuers the crosswalk placed on the SEC filer list but the equity
+    snapshot does not hold — 1,080 bonds on 2026Q2. It is given the tickers to
+    fetch explicitly: pulling facts for every one of ~10,000 SEC filers would
+    cost hours to fill in issuers no bond in the universe references.
+
+    Values are derived in the equity snapshot's conventions (see
+    data/sec_xbrl_client.derive) and point-in-time by FILING date. Fields the
+    facts cannot support are omitted rather than guessed, and schema_fields()
+    reports only what was actually derived, so the vintage masking in the
+    gates treats a field this source never carries as unmeasurable.
+
+    Market cap needs a price, which XBRL does not have: shares outstanding
+    times the close on or before as_of from `price_fn`. Without mcap the
+    corporate scorecard's coverage falls below its 50% floor, so an issuer
+    with no price gets no implied bucket — correctly, not silently.
     """
 
-    available = False
+    def __init__(self, tickers=(), cik_map=None, as_of=None, client=None,
+                 price_fn=None):
+        self.tickers = sorted({(t or '').strip().upper() for t in tickers if t})
+        self.cik_map = {k.upper(): v for k, v in (cik_map or {}).items()}
+        self.as_of = as_of or date.today()
+        self._client = client
+        self._price_fn = price_fn
+        self._rows = None
+        self._schema = set()
+
+    @property
+    def available(self):
+        return bool(self.tickers)
 
     def load(self):
-        return {}
+        if self._rows is not None:
+            return self._rows
+        from data.sec_xbrl_client import SECXBRLClient, derive
+        client = self._client or SECXBRLClient()
+        price_fn = self._price_fn or close_on_or_before
+        out, no_cik, no_facts = {}, 0, 0
+        for ticker in self.tickers:
+            cik = self.cik_map.get(ticker)
+            if cik is None:
+                no_cik += 1
+                continue
+            facts = client.companyfacts(cik)
+            if not facts:
+                no_facts += 1
+                continue
+            entry = derive(facts, self.as_of, price=price_fn(ticker, self.as_of))
+            if entry:
+                out[ticker] = {**{k: None for k in WANTED_FIELDS}, **entry}
+        self._schema = {f for f in WANTED_FIELDS
+                        if any(e.get(f) is not None for e in out.values())}
+        if self.tickers:
+            log.info('SEC XBRL as of %s: %d of %d filer issuers with fundamentals '
+                     '(%d no CIK, %d no facts)', self.as_of, len(out),
+                     len(self.tickers), no_cik, no_facts)
+        self._rows = out
+        return out
 
     def names(self):
+        # Identity comes from the SEC filer crosswalk, not from this backend.
         return []
 
     def schema_fields(self):
-        return set()
+        self.load()
+        return set(self._schema)
+
+
+_PRICE_CACHE = {}
+
+
+def close_on_or_before(ticker, when, lookback_days=10):
+    """Closing price on or before `when` from yfinance, or None.
+
+    One history download per ticker per process, cached on disk for a week
+    under data/cache/sec/prices so a universe rebuild does not refetch.
+    """
+    ticker = (ticker or '').strip().upper()
+    if not ticker:
+        return None
+    if ticker not in _PRICE_CACHE:
+        _PRICE_CACHE[ticker] = _load_price_history(ticker)
+    history = _PRICE_CACHE[ticker]
+    target = when.isoformat() if hasattr(when, 'isoformat') else str(when)
+    eligible = [d for d in history if d <= target]
+    if not eligible:
+        return None
+    best = max(eligible)
+    if (datetime.strptime(target, '%Y-%m-%d')
+            - datetime.strptime(best, '%Y-%m-%d')).days > lookback_days:
+        return None
+    return history[best]
+
+
+def _load_price_history(ticker, max_age_days=7):
+    import time as _time
+    cache_dir = os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), 'data', 'cache', 'sec', 'prices')
+    path = os.path.join(cache_dir, f'{ticker.replace("/", "_")}.json')
+    if (os.path.exists(path)
+            and _time.time() - os.path.getmtime(path) < max_age_days * 86400):
+        try:
+            with open(path, encoding='utf-8') as fh:
+                return json.load(fh)
+        except (OSError, ValueError):
+            pass
+    history = {}
+    try:
+        import yfinance as yf
+        frame = yf.Ticker(ticker).history(period='3y', auto_adjust=False)
+        history = {idx.strftime('%Y-%m-%d'): float(close)
+                   for idx, close in frame['Close'].items() if close == close}
+    except Exception as exc:          # yfinance raises a zoo of types
+        log.warning('No price history for %s: %s', ticker, exc)
+    os.makedirs(cache_dir, exist_ok=True)
+    try:
+        with open(path + '.tmp', 'w', encoding='utf-8') as fh:
+            json.dump(history, fh)
+        os.replace(path + '.tmp', path)
+    except OSError:
+        pass
+    return history
 
 
 class IssuerFundamentals:
