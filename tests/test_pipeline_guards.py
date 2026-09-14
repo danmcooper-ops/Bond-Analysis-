@@ -170,3 +170,72 @@ def test_fit_prefers_bucket_assigned_tiers_per_tier():
     tiers = fit(buckets)['by_tier']
     assert tiers['tight']['assigned_by'] == 'implied_bucket'
     assert tiers['wide']['assigned_by'] == 'observed_spread'
+
+
+# --- backtest point-in-time fundamentals via XBRL ----------------------------
+
+def test_backtest_uses_xbrl_before_the_first_equity_snapshot(tmp_path, monkeypatch):
+    import gzip
+    import json
+    from datetime import date
+
+    import scripts.backtest as bt
+    snapshots = tmp_path / 'equity'
+    snapshots.mkdir()
+    with gzip.open(snapshots / 'results_2026-04-20.json.gz', 'wt') as fh:
+        json.dump({'date': '2026-04-20', 'results': [
+            {'ticker': 'ACME', 'company_name': 'Acme', 'int_cov': 9.0}]}, fh)
+    monkeypatch.setenv('EQUITY_SNAPSHOT_DIR', str(snapshots))
+
+    def fact(end, val, filed):
+        return {'end': end, 'val': val, 'filed': filed, 'form': '10-K'}
+
+    class Client:
+        def companyfacts(self, cik):
+            return {'entityName': 'Acme', 'facts': {'dei': {}, 'us-gaap': {
+                'LongTermDebt': {'USD': [fact('2024-12-31', 500.0, '2025-02-20')]}}}}
+
+    pit = bt.PointInTime()
+    pit.set_issuers({'000000': {'key': 'ACME', 'confidence': 0.95}},
+                    ['ACME'], {'ACME': 1}, client=Client())
+    monkeypatch.setattr('data.issuer_fundamentals.close_on_or_before',
+                        lambda t, d: None)
+
+    early, _ = pit.fundamentals(date(2025, 6, 30))
+    assert early.get('ACME')['_fundamentals_source'] == 'sec_xbrl'
+    assert early.get('ACME')['total_debt'] == 500.0
+    late, _ = pit.fundamentals(date(2026, 4, 30))
+    assert late.get('ACME')['_fundamentals_source'] == 'equity_snapshot'
+    assert pit.resolution('000000AA1')['key'] == 'ACME'
+
+
+def test_resolve_issuers_promotes_confident_filers_only():
+    from scripts.build_universe import resolve_issuers
+    marks = [{'cusip': '111111AA1', 'issuer_name': 'ACME CORP', 'total_held_usd': 1e8},
+             {'cusip': '222222AA1', 'issuer_name': 'WIDGETCO INC', 'total_held_usd': 1e8}]
+    names = [('ACME', 'Acme Corp')]
+    filers = [('ACME', 'Acme Corp'), ('WDGT', 'Widgetco Inc')]
+    _, resolutions, promoted = resolve_issuers(marks, names, filers=filers)
+    assert resolutions['111111']['key'] == 'ACME'
+    assert resolutions['222222']['key'] == 'WDGT'
+    assert resolutions['222222']['method'].startswith('filer_xbrl')
+    assert promoted == ['WDGT']
+    _, resolutions, promoted = resolve_issuers(marks, names, filers=filers, no_xbrl=True)
+    assert not resolutions['222222'].get('key') and promoted == []
+
+
+def test_periods_below_the_scored_share_are_untestable():
+    from datetime import date
+
+    import scripts.backtest as bt
+    good, thin = date(2026, 3, 31), date(2025, 6, 30)
+    records = ([{'period': good, 'implied_bucket': 'A',
+                 'fundamentals_source': 'sec_xbrl'}] * 30
+               + [{'period': good, 'implied_bucket': None}] * 70
+               + [{'period': thin, 'implied_bucket': 'A',
+                   'fundamentals_source': 'equity_snapshot'}] * 5
+               + [{'period': thin, 'implied_bucket': None}] * 95)
+    coverage = bt.coverage_by_period(records)
+    assert coverage[good][1] == 0.30 and coverage[thin][1] == 0.05
+    kept = bt.testable_records(records, coverage)
+    assert {r['period'] for r in kept} == {good}

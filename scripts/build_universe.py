@@ -145,6 +145,61 @@ def load_sec_cik_map():
             if v.get('ticker') and v.get('cik_str') is not None}
 
 
+def resolve_issuers(marks, name_index, no_xbrl=False, filers=None):
+    """(groups, resolutions, xbrl_tickers) for a set of marks.
+
+    Shared by the universe build and the backtest so both identify issuers by
+    exactly the same rules:
+
+      1. the fundamentals name index (the equity snapshot's companies);
+      2. for anything it cannot place, the full SEC filer list, and a
+         confident filer match (>= MIN_CUSIP_MATCH_CONFIDENCE) is PROMOTED to
+         key=filer ticker, method 'filer_xbrl:*', so SEC XBRL can supply the
+         fundamentals and the row keeps a real match confidence.
+
+    xbrl_tickers are the promoted filer tickers.
+    """
+    crosswalk = CusipCrosswalk(index=name_index)
+    filer_crosswalk = CusipCrosswalk(index=filers if filers is not None
+                                     else load_sec_filers())
+    groups = group_by_issuer(marks)
+    resolutions = crosswalk.resolve_all(groups)
+
+    for prefix, resolution in resolutions.items():
+        if resolution.get('key') or resolution.get('method') == 'override_no_fundamentals':
+            continue
+        fallback = filer_crosswalk.resolve(prefix, groups[prefix].get('names'),
+                                           groups[prefix].get('held_by_name'))
+        if fallback.get('key'):
+            resolution.update({
+                'filer_key': fallback['key'],
+                'filer_method': fallback.get('method'),
+                'matched_name': fallback.get('matched_name'),
+            })
+            if (not no_xbrl and fallback.get('confidence', 0.0)
+                    >= MIN_CUSIP_MATCH_CONFIDENCE):
+                resolution.update({
+                    'key': fallback['key'],
+                    'method': f"filer_xbrl:{fallback.get('method')}",
+                    'confidence': fallback.get('confidence'),
+                })
+
+    xbrl_tickers = sorted({r['key'] for r in resolutions.values()
+                           if str(r.get('method', '')).startswith('filer_xbrl')})
+    log.info('SEC XBRL: %d filer issuers promoted for fundamentals',
+             len(xbrl_tickers))
+    return groups, resolutions, xbrl_tickers
+
+
+def fundamentals_with_xbrl(when, xbrl_tickers, cik_map, client=None):
+    """The equity snapshot first, SEC XBRL for `xbrl_tickers` behind it,
+    both pinned to `when`."""
+    return IssuerFundamentals(backends=[
+        EquitySnapshotBackend(as_of=when),
+        SECXBRLBackend(tickers=xbrl_tickers, cik_map=cik_map, as_of=when,
+                       client=client)])
+
+
 def build(quarter, as_of, min_funds, min_held, audit=0, no_xbrl=False):
     marks = load_marks(quarter)
     corporates = [m for m in marks if m.get('issuer_type') in CORPORATE_ISSUER_TYPES]
@@ -166,48 +221,12 @@ def build(quarter, as_of, min_funds, min_held, audit=0, no_xbrl=False):
     # of that row's own mark date (below): one snapshot for the whole quarter
     # attached fundamentals up to 211 days newer than a row's price.
     fundamentals = IssuerFundamentals(as_of=fundamentals_asof)
-    crosswalk = CusipCrosswalk(index=fundamentals.names())
-    filer_crosswalk = CusipCrosswalk(index=load_sec_filers())
-
-    groups = group_by_issuer(corporates)
-    resolutions = crosswalk.resolve_all(groups)
-
-    # Anything the fundamentals index could not place gets a second pass
-    # against the full SEC filer list, purely for diagnosis.
-    for prefix, resolution in resolutions.items():
-        if resolution.get('key') or resolution.get('method') == 'override_no_fundamentals':
-            continue
-        fallback = filer_crosswalk.resolve(prefix, groups[prefix].get('names'),
-                                           groups[prefix].get('held_by_name'))
-        if fallback.get('key'):
-            resolution.update({
-                'filer_key': fallback['key'],
-                'filer_method': fallback.get('method'),
-                'matched_name': fallback.get('matched_name'),
-            })
-            # A confident filer match is a real identification: promote it,
-            # so the SEC XBRL backend can supply the fundamentals and the row
-            # keeps its match confidence instead of reading 0.0.
-            if (not no_xbrl and fallback.get('confidence', 0.0)
-                    >= MIN_CUSIP_MATCH_CONFIDENCE):
-                resolution.update({
-                    'key': fallback['key'],
-                    'method': f"filer_xbrl:{fallback.get('method')}",
-                    'confidence': fallback.get('confidence'),
-                })
-
-    # The equity snapshot first, SEC XBRL for the promoted filers behind it,
-    # both pinned to each row's own mark date.
-    xbrl_tickers = sorted({r['key'] for r in resolutions.values()
-                           if str(r.get('method', '')).startswith('filer_xbrl')})
+    groups, resolutions, xbrl_tickers = resolve_issuers(
+        corporates, fundamentals.names(), no_xbrl=no_xbrl)
     cik_map = load_sec_cik_map() if xbrl_tickers else {}
-    log.info('SEC XBRL: %d filer issuers promoted for fundamentals',
-             len(xbrl_tickers))
 
     def fundamentals_for(when):
-        return IssuerFundamentals(backends=[
-            EquitySnapshotBackend(as_of=when),
-            SECXBRLBackend(tickers=xbrl_tickers, cik_map=cik_map, as_of=when)])
+        return fundamentals_with_xbrl(when, xbrl_tickers, cik_map)
 
     fundamentals_by_date = {}
 

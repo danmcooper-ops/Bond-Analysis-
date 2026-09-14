@@ -169,6 +169,13 @@ class PointInTime:
 
     def __init__(self, allow_lookahead=False):
         self._allow_lookahead = allow_lookahead
+        # Issuer identity for the whole panel, set by set_issuers(). Without
+        # it, fundamentals() falls back to per-row resolution against the
+        # equity snapshot's names only.
+        self._resolutions = None
+        self._xbrl_tickers = ()
+        self._cik_map = {}
+        self._xbrl_client = None
         self._curves = {}
         self._oas = {}
         self._term = {}
@@ -209,6 +216,26 @@ class PointInTime:
                                 else self._fred.fetch_term_factors(when)['points'])
         return self._term[when]
 
+    def set_issuers(self, resolutions, xbrl_tickers, cik_map, client=None):
+        """Use shared issuer resolutions and an SEC XBRL fallback.
+
+        `resolutions` comes from build_universe.resolve_issuers over the whole
+        panel. `xbrl_tickers` should be EVERY resolved key, not just promoted
+        filers: equity snapshots begin 2026-04-20, so for any earlier date an
+        equity-universe issuer has no snapshot and only XBRL can say what its
+        balance sheet looked like then.
+        """
+        from data.sec_xbrl_client import SECXBRLClient
+        self._resolutions = resolutions
+        self._xbrl_tickers = tuple(xbrl_tickers)
+        self._cik_map = cik_map
+        self._xbrl_client = client or SECXBRLClient()
+
+    def resolution(self, cusip):
+        if self._resolutions is None:
+            return None
+        return self._resolutions.get((cusip or '')[:6].upper()) or {}
+
     def fundamentals(self, when):
         """Fundamentals as they stood on `when`.
 
@@ -224,8 +251,16 @@ class PointInTime:
         """
         key = when if not self._allow_lookahead else 'latest'
         if key not in self._fundamentals:
-            source = IssuerFundamentals(
-                as_of=None if self._allow_lookahead else when)
+            as_of = None if self._allow_lookahead else when
+            if self._resolutions is not None:
+                from scripts.build_universe import fundamentals_with_xbrl
+                source = fundamentals_with_xbrl(
+                    as_of or date.today(), self._xbrl_tickers, self._cik_map,
+                    client=self._xbrl_client)
+                if as_of is None:
+                    source.backends[0].as_of = None       # newest equity snapshot
+            else:
+                source = IssuerFundamentals(as_of=as_of)
             self._fundamentals[key] = source
             self._crosswalks[key] = CusipCrosswalk(index=source.names())
         return self._fundamentals[key], self._crosswalks[key]
@@ -334,11 +369,20 @@ def _compute_base_signal(row, pit, params):
     cvx = convexity(flows, ytm_guess, frequency=bond.frequency)
 
     source, crosswalk = pit.fundamentals(when)
-    resolution = crosswalk.resolve(row['cusip'], [row.get('issuer_name')])
+    resolution = pit.resolution(row['cusip'])
+    if resolution is None:
+        resolution = crosswalk.resolve(row['cusip'], [row.get('issuer_name')])
     entry = source.get(resolution.get('key')) if resolution.get('key') else None
+    if entry is not None:
+        # Never score with fundamentals struck after the observation.
+        asof = entry.get('_fundamentals_asof')
+        if asof and str(asof)[:10] > when.isoformat():
+            entry = None
 
     bucket = None
+    fundamentals_source = None
     if entry and (resolution.get('confidence') or 0) >= 0.80:
+        fundamentals_source = entry.get('_fundamentals_source')
         result = credit.implied_bucket(
             {'int_cov': entry.get('int_cov'),
              'nd_ebitda': entry.get('nd_ebitda'),
@@ -357,6 +401,7 @@ def _compute_base_signal(row, pit, params):
         'bond': bond, 'z_spread': z, 'modified_duration': mod,
         'convexity': cvx, 'years_to_maturity': ttm, 'accrued': accrued,
         'implied_bucket': bucket,
+        'fundamentals_source': fundamentals_source if bucket else None,
     }
 
 
@@ -415,6 +460,7 @@ def measure(pairs, pit, params):
             'spread_mispricing': signal['spread_mispricing'],
             'divergence': signal['divergence'],
             'implied_bucket': signal['implied_bucket'],
+            'fundamentals_source': signal.get('fundamentals_source'),
             'market_bucket': signal['market_bucket'],
             'spread_change': (end_signal['z_spread'] - signal['z_spread']
                               if end_signal else None),
@@ -551,6 +597,43 @@ def bucket_test(records):
     return None
 
 
+MIN_SCORED_SHARE = 0.20
+
+
+def coverage_by_period(records):
+    """{period: (n, scored_share, {source: n})} for fundamentals-scored rows."""
+    out = {}
+    for period in sorted({r['period'] for r in records}):
+        subset = [r for r in records if r['period'] == period]
+        sources = Counter(r.get('fundamentals_source') for r in subset
+                          if r.get('implied_bucket'))
+        scored = sum(sources.values())
+        out[period] = (len(subset), scored / len(subset) if subset else 0.0,
+                       dict(sources))
+    return out
+
+
+def testable_records(records, coverage):
+    """Records from periods where enough rows carry fundamentals.
+
+    A period where a handful of bonds have a credit view is not evidence
+    about the credit view; it is reported as untestable, not pooled in.
+    """
+    keep = {p for p, (_, share, _) in coverage.items() if share >= MIN_SCORED_SHARE}
+    return [r for r in records if r['period'] in keep]
+
+
+def print_coverage(coverage):
+    print(f"\n  FUNDAMENTALS COVERAGE BY PERIOD  (credit tests need >= "
+          f"{MIN_SCORED_SHARE:.0%})")
+    print(f"    {'period':<12}{'bonds':>7}{'scored':>9}{'equity':>9}{'xbrl':>7}")
+    for period, (n, share, sources) in coverage.items():
+        flag = '' if share >= MIN_SCORED_SHARE else '   untestable'
+        print(f"    {str(period):<12}{n:>7}{share:>8.0%}"
+              f"{sources.get('equity_snapshot', 0):>9}"
+              f"{sources.get('sec_xbrl', 0):>7}{flag}")
+
+
 def summarise(records):
     print(f"\n{'=' * 78}")
     print(f"  MARKED-TO-MARKED BACKTEST  —  {len(records):,} bond-months")
@@ -566,6 +649,41 @@ def summarise(records):
     print(f"  Excess stdev        {statistics.pstdev(excess) * 10000:>8.1f} bp")
 
 
+def setup_issuers(pit, rows):
+    """Resolve every panel issuer once and give the PIT an XBRL fallback."""
+    from data.issuer_fundamentals import EquitySnapshotBackend
+    from scripts.build_universe import load_sec_cik_map, resolve_issuers
+    # Identity from the newest equity snapshot's names is not look-ahead: a
+    # company's name does not carry its future balance sheet.
+    names = EquitySnapshotBackend(as_of=None).names()
+    _, resolutions, _ = resolve_issuers(rows, names)
+    tickers = sorted({r['key'] for r in resolutions.values() if r.get('key')})
+    cik_map = load_sec_cik_map()
+    pit.set_issuers(resolutions, tickers, cik_map)
+    log.info('Backtest issuers: %d resolved keys, %d with a CIK', len(tickers),
+             sum(1 for t in tickers if t in cik_map))
+    return tickers, cik_map
+
+
+def prefetch_xbrl(tickers, cik_map, client):
+    """Warm the company-facts and price caches so the backtest runs offline."""
+    import time as _time
+    from data.issuer_fundamentals import close_on_or_before
+    start, done, missing = _time.time(), 0, 0
+    for ticker in tickers:
+        cik = cik_map.get(ticker)
+        if cik is None:
+            missing += 1
+            continue
+        client.companyfacts(cik)
+        close_on_or_before(ticker, date.today())
+        done += 1
+        if done % 100 == 0:
+            log.info('Prefetched %d of %d issuers (%.0f min)', done,
+                     len(tickers), (_time.time() - start) / 60)
+    log.info('Prefetch complete: %d issuers, %d without a CIK', done, missing)
+
+
 def main():
     ap = argparse.ArgumentParser(
         description=__doc__,
@@ -578,10 +696,21 @@ def main():
                          'tell a weak signal from a broken one')
     ap.add_argument('--limit', type=int, default=0,
                     help='cap the number of pairs (for a fast smoke run)')
+    ap.add_argument('--prefetch-xbrl', action='store_true',
+                    help='download SEC company facts and price history for '
+                         'every resolved issuer, then exit (network, ~1h once)')
+    ap.add_argument('--no-xbrl', action='store_true',
+                    help='equity snapshots only (the pre-XBRL behaviour)')
     args = ap.parse_args()
 
     params = default_params()
     rows = load_panel(args.min_funds, args.min_held)
+    pit = PointInTime(args.allow_lookahead)
+    if not args.no_xbrl:
+        tickers, cik_map = setup_issuers(pit, rows)
+        if args.prefetch_xbrl:
+            prefetch_xbrl(tickers, cik_map, pit._xbrl_client)
+            return 0
     pairs = build_pairs(rows)
     if args.limit:
         pairs = pairs[:args.limit]
@@ -591,7 +720,7 @@ def main():
                          'quarters so the same CUSIP appears in consecutive '
                          'months')
 
-    records = measure(pairs, PointInTime(args.allow_lookahead), params)
+    records = measure(pairs, pit, params)
     if len(records) < MIN_PER_PERIOD:
         raise SystemExit(f'[fatal] only {len(records)} measured bond-months')
 
@@ -604,15 +733,18 @@ def main():
         print("!" * 78)
 
     summarise(records)
+    coverage = coverage_by_period(records)
+    print_coverage(coverage)
+    credit_records = testable_records(records, coverage)
     # Spread level needs no fundamentals, so it is testable over the whole
     # panel. It is also the honest fallback: if carry alone explains the
     # forward return, the credit machinery has to beat it to justify itself.
     carry = decile_test(records, 'z_spread',
                         'SPREAD LEVEL — does carry alone predict excess return?')
-    mispricing = decile_test(records, 'spread_mispricing',
+    mispricing = decile_test(credit_records, 'spread_mispricing',
                              'MISPRICING DECILES — cheap should beat rich')
-    divergence = divergence_test(records)
-    buckets = bucket_test(records)
+    divergence = divergence_test(credit_records)
+    buckets = bucket_test(credit_records)
 
     print(f"\n{'=' * 78}")
     print("  VERDICT")
