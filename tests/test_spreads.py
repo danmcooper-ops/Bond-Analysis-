@@ -12,7 +12,7 @@ import pytest
 from models.curve import YieldCurve
 from models.pricing import bond_flows_and_stub, yield_to_maturity
 from models.schedule import accrued_interest
-from models.spreads import (fit_z_oas_wedge, is_likely_callable,
+from models.spreads import (is_likely_callable,
                             nominal_spread, price_from_zero_curve,
                             spread_to_price, z_spread)
 
@@ -131,47 +131,6 @@ def test_treasuries_are_not_flagged_on_price_alone():
     price must not drag them into the callable cap."""
     assert is_likely_callable(
         {'asset_class': 'TREASURY', 'clean_price_est': 108.0}) is False
-
-
-# ---------------------------------------------------------------------------
-# The fitted Z-minus-OAS wedge
-# ---------------------------------------------------------------------------
-
-def test_wedge_is_the_median_gap_per_bucket():
-    model_z = {'BBB': {'2026-01': 0.0180, '2026-02': 0.0190, '2026-03': 0.0200}}
-    fred = {'BBB': {'2026-01': 0.0150, '2026-02': 0.0155, '2026-03': 0.0165}}
-    out = fit_z_oas_wedge(model_z, fred)
-    assert out['BBB']['wedge'] == pytest.approx(0.0035)
-    assert out['BBB']['n_months'] == 3
-    assert out['BBB']['confident'] is True
-
-
-def test_wedge_uses_the_median_so_one_bad_month_cannot_move_it():
-    """A quarter where a large fund restates its marks should not reprice the
-    fair spread of every bond in the bucket."""
-    model_z = {'BB': {'m1': 0.030, 'm2': 0.031, 'm3': 0.032,
-                      'm4': 0.033, 'm5': 0.500}}
-    fred = {'BB': {'m1': 0.025, 'm2': 0.026, 'm3': 0.027,
-                   'm4': 0.028, 'm5': 0.029}}
-    assert fit_z_oas_wedge(model_z, fred)['BB']['wedge'] == pytest.approx(0.005)
-
-
-def test_wedge_reports_low_confidence_on_thin_history():
-    out = fit_z_oas_wedge({'A': {'m1': 0.012}}, {'A': {'m1': 0.010}})
-    assert out['A']['n_months'] == 1
-    assert out['A']['confident'] is False
-
-
-def test_wedge_defaults_to_zero_when_there_is_no_overlap():
-    out = fit_z_oas_wedge({'AAA': {'m1': 0.006}}, {'AAA': {'m9': 0.005}})
-    assert out['AAA'] == {'wedge': 0.0, 'n_months': 0, 'confident': False}
-
-
-def test_wedge_skips_months_with_missing_values():
-    model_z = {'A': {'m1': 0.012, 'm2': None, 'm3': 0.014}}
-    fred = {'A': {'m1': 0.010, 'm2': 0.011, 'm3': 0.011}}
-    out = fit_z_oas_wedge(model_z, fred)
-    assert out['A']['n_months'] == 2
 
 
 def test_z_spread_solves_for_distressed_paper(sample_par_curve):

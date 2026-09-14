@@ -21,10 +21,10 @@ every callable look systematically cheap.
 Three mitigations, none of which is "assume it away":
 
   1. `is_likely_callable` flags the suspects from the data we do have.
-  2. `fit_z_oas_wedge` FITS the Z-minus-OAS gap per rating bucket by
-     regressing this model's own aggregate Z-spreads against the published
-     bucket OAS across months. The wedge is measured, not assumed, and it is
-     refit monthly.
+  2. Fair spreads are anchored on the median Z-spread of the model's own
+     credit buckets (credit.fit_bucket_anchors), not on the published OAS,
+     so Z is compared with Z. A fitted Z-minus-OAS wedge was built for the
+     index-anchored version and removed once nothing used it.
   3. A bond that is priced above par, is probably callable, and has no call
      schedule gets a HOLD cap — because that is precisely the case where the
      Z-spread lies worst, and the honest answer is "we cannot tell".
@@ -140,38 +140,3 @@ def is_likely_callable(row):
         if price is not None and price > 100.5:
             return True
     return False
-
-
-def fit_z_oas_wedge(model_z_by_bucket, fred_oas_by_bucket, min_months=3):
-    """Fit the Z-minus-OAS wedge per rating bucket from observed history.
-
-    Args:
-        model_z_by_bucket: {bucket: {month: median model Z-spread}}
-        fred_oas_by_bucket: {bucket: {month: published bucket OAS}}
-        min_months: below this, report the wedge but mark it low-confidence.
-
-    Returns:
-        {bucket: {'wedge': float, 'n_months': int, 'confident': bool}}
-
-    The wedge is the median of (model Z - published OAS) over the months where
-    both exist. Median rather than mean because a single month of bad marks —
-    a quarter where a large fund restated, say — should not move the fitted
-    wedge for every bond in the bucket.
-    """
-    out = {}
-    for bucket, z_months in model_z_by_bucket.items():
-        oas_months = fred_oas_by_bucket.get(bucket) or {}
-        diffs = sorted(z_months[mth] - oas_months[mth]
-                       for mth in z_months
-                       if mth in oas_months
-                       and z_months[mth] is not None
-                       and oas_months[mth] is not None)
-        if not diffs:
-            out[bucket] = {'wedge': 0.0, 'n_months': 0, 'confident': False}
-            continue
-        n = len(diffs)
-        median = (diffs[n // 2] if n % 2
-                  else 0.5 * (diffs[n // 2 - 1] + diffs[n // 2]))
-        out[bucket] = {'wedge': median, 'n_months': n,
-                       'confident': n >= min_months}
-    return out

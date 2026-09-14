@@ -10,7 +10,7 @@ should this bond trade at, and what does it actually trade at?
 THE CHAIN
 ---------
     issuer financials -> credit score -> implied rating bucket
-    bucket + maturity -> fair spread   (FRED bucket OAS x term factor + wedge)
+    bucket + maturity -> fair spread   (bucket anchor x term factor)
     fair spread       -> fair price
     observed - fair   -> the mispricing signal
 
@@ -190,11 +190,11 @@ def asset_class_for(bucket):
 # ---------------------------------------------------------------------------
 
 def fair_spread(bucket, maturity_years, bucket_oas, term_points=None,
-                wedge=None, beta=1.0, term_by_bucket=None,
+                beta=1.0, term_by_bucket=None,
                 bucket_anchors=None):
     """The spread this bond should trade at, per the market's own pricing.
 
-        fair = bucket OAS  x  term factor(maturity)  +  wedge(bucket)
+        fair = bucket anchor  x  term factor(maturity)
 
     The TERM FACTOR matters and is often skipped: the published bucket OAS is
     a whole-index number with a duration around seven years, so using it flat
@@ -221,10 +221,9 @@ def fair_spread(bucket, maturity_years, bucket_oas, term_points=None,
     17%, making long bonds look richer than they were — the opposite of the
     bias originally suspected.
 
-    The WEDGE corrects Z-spread against OAS. We compute Z-spreads and compare
-    them to an OAS index; for callable paper Z exceeds OAS by roughly the
-    value of the call. The wedge is FITTED from observed history by
-    spreads.fit_z_oas_wedge, never assumed.
+    The anchor is a Z-spread (the bucket's own median), so no Z-minus-OAS
+    correction is needed; the index OAS is only a fallback for a bucket too
+    thin to anchor.
     """
     if bucket is None or maturity_years is None:
         return None
@@ -272,14 +271,7 @@ def fair_spread(bucket, maturity_years, bucket_oas, term_points=None,
         from data.fred_client import term_factor_at
         factor = term_factor_at(points, maturity_years, beta=beta)
 
-    adjustment = 0.0
-    if wedge:
-        entry = wedge.get(bucket)
-        if isinstance(entry, dict):
-            adjustment = entry.get('wedge') or 0.0
-        elif entry is not None:
-            adjustment = entry
-    return base * factor + adjustment
+    return base * factor
 
 
 def fair_price(flows, settle, curve, fair_z):
@@ -309,7 +301,7 @@ def price_mispricing(observed_clean, fair_clean):
 
 
 def market_implied_bucket(observed_z, maturity_years, bucket_oas,
-                          term_points=None, wedge=None, beta=1.0,
+                          term_points=None, beta=1.0,
                           term_by_bucket=None, bucket_anchors=None):
     """Which bucket's fair spread best explains this bond's actual spread?
 
@@ -322,7 +314,7 @@ def market_implied_bucket(observed_z, maturity_years, bucket_oas,
     levels = []
     for bucket in CREDIT_BUCKETS:
         implied = fair_spread(bucket, maturity_years, bucket_oas,
-                              term_points=term_points, wedge=wedge, beta=beta,
+                              term_points=term_points, beta=beta,
                               term_by_bucket=term_by_bucket,
                               bucket_anchors=bucket_anchors)
         if implied is None or implied <= 0:
