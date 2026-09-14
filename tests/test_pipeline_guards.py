@@ -299,3 +299,11 @@ def test_universe_rows_at_applies_the_build_filters():
     out = bt.universe_rows_at(rows, when)
     assert len(out) == 1
     assert out[0]['coupon_rate'] == 0.05 and out[0]['mark_date'] == when
+
+
+def test_business_day_report_dates_group_into_their_month():
+    from datetime import date
+
+    from scripts.backtest import month_end
+    assert month_end(date(2025, 11, 28)) == month_end(date(2025, 11, 30)) == date(2025, 11, 30)
+    assert month_end(date(2026, 2, 27)) == date(2026, 2, 28)

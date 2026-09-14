@@ -452,7 +452,8 @@ def measure(pairs, pit, params):
         end_signal = signals_at(later, pit, params)
         out.append({
             'cusip': earlier['cusip'],
-            'period': earlier['report_date'],
+            'period': month_end(earlier['report_date']),
+            'report_date': earlier['report_date'],
             'horizon_days': gap,
             'total_return': total,
             'excess_return': total - benchmark,
@@ -610,11 +611,11 @@ def score_period(rows_at_t, when, pit, params):
 
 def attach_ratings(records, rows, pit, params):
     """Add rating, rating_raw and composite to each record from its period."""
-    for when in sorted({r['period'] for r in records}):
+    for when in sorted({r['report_date'] for r in records}):
         ratings = score_period(universe_rows_at(rows, when), when, pit, params)
         log.info('Scored %s: %d bonds rated', when, len(ratings))
         for record in records:
-            if record['period'] == when and record['cusip'] in ratings:
+            if record['report_date'] == when and record['cusip'] in ratings:
                 rating, raw, composite = ratings[record['cusip']]
                 record.update({'rating': rating, 'rating_raw': raw,
                                'composite': composite})
@@ -747,6 +748,17 @@ def bucket_test(records):
 
 
 MIN_SCORED_SHARE = 0.20
+
+
+def month_end(when):
+    """The calendar month-end a report date belongs to.
+
+    Most N-PORT filings report as of the calendar month-end, but some funds
+    use the last BUSINESS day (2025-11-28 for November). Grouping on the raw
+    date split each such month into a ~50-bond fragment period.
+    """
+    import calendar
+    return date(when.year, when.month, calendar.monthrange(when.year, when.month)[1])
 
 
 def coverage_by_period(records):
