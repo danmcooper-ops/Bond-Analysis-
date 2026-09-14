@@ -57,6 +57,7 @@ from models.spreads import (is_likely_callable, price_from_zero_curve,
                             yield_over_treasury, z_spread)
 from models.total_return import carry, roll_down
 from scripts.gates import SPEC
+from scripts.model_version import run_stamp
 from scripts.param_set import default_params, validate_params
 from scripts.scoring_kernel import score_and_rate
 
@@ -780,7 +781,7 @@ def print_table(rows, limit=25):
 # Artifacts
 # ---------------------------------------------------------------------------
 
-def write_snapshot(rows, ctx, settle, as_json=False):
+def write_snapshot(rows, ctx, settle, as_json=False, params=None):
     """Persist the run. Parquet by default.
 
     30k rows x ~120 keys of pretty JSON runs 45-75 MB/day, which is exactly
@@ -806,12 +807,15 @@ def write_snapshot(rows, ctx, settle, as_json=False):
         'data_vintage_age_days': ((settle - ctx['data_vintage']).days
                                   if ctx.get('data_vintage') else None),
         'par_curve': ctx['par'],
+        # Which model produced these ratings; see scripts/model_version.py.
+        **run_stamp(params or default_params()),
     }
     meta_path = os.path.join(OUTPUT_DIR, f'run_meta_{stamp}.json')
 
     # The regime dict is per-run context, not per-row data; it would bloat
     # every row and does not belong in a columnar store.
-    flat = [{k: v for k, v in r.items() if k != '_curve_regime'} for r in rows]
+    flat = [{**{k: v for k, v in r.items() if k != '_curve_regime'},
+             'model_version': meta['model_version']} for r in rows]
 
     # Both files go down via temp file + rename, and run_meta goes LAST: its
     # presence is what tells report_html the run completed. A run killed
@@ -919,7 +923,7 @@ def main():
 
     if not args.no_write:
         log.info('Phase 5: artifacts')
-        write_snapshot(rows, ctx, settle, as_json=args.json)
+        write_snapshot(rows, ctx, settle, as_json=args.json, params=params)
     print()
     return 0
 

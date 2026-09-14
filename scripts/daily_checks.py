@@ -114,13 +114,40 @@ def _load(stamp):
         os.path.join(OUTPUT_DIR, f'results_{stamp}.parquet')).to_dict('records')
 
 
+def comparable_prior(run_date):
+    """(prior_date, note): the latest earlier run from the SAME model.
+
+    Drift across a model change is the model moving, not the market; the
+    09-13 recalibration against a 09-09 snapshot raised exactly that false
+    alert. Returns (None, note) when the newest earlier run is a different
+    model, so the check is skipped rather than silently compared further back.
+    """
+    from scripts.model_version import snapshot_version
+    current = snapshot_version(_meta_path(run_date))
+    prior = [d for d in _dates('results_*.parquet') if d.isoformat() < run_date]
+    if not prior:
+        return None, None
+    last = prior[-1]
+    last_version = snapshot_version(_meta_path(last.isoformat()))
+    if last_version != current:
+        return None, (f'model version changed ({last_version} -> {current}); '
+                      f'drift check skipped')
+    return last, None
+
+
+def _meta_path(stamp):
+    return os.path.join(OUTPUT_DIR, f'run_meta_{stamp}.json')
+
+
 def check_ratings(run_date):
     rows = _load(run_date)
     mix, capped = rating_mix(rows)
-    prior = [d for d in _dates('results_*.parquet') if d.isoformat() < run_date]
-    prior_mix = rating_mix(_load(prior[-1].isoformat()))[0] if prior else None
+    prior, note = comparable_prior(run_date)
+    prior_mix = rating_mix(_load(prior.isoformat()))[0] if prior else None
 
-    print(f'Rating mix {run_date} (prior: {prior[-1] if prior else "none"})')
+    print(f'Rating mix {run_date} (prior: {prior or "none"})')
+    if note:
+        print(f'NOTE {note}')
     for cls in CLASSES:
         print(f'  {cls:<9} ' + '  '.join(f'{k} {100 * mix[cls][k]:5.1f}%'
                                          for k in RATINGS))
