@@ -257,7 +257,10 @@ def test_per_asset_class_thresholds_win_over_base():
     thresholds in config, and a test that reads live config is testing the
     calibration rather than the precedence logic."""
     params = {'rating_threshold_buy': 57, 'rating_threshold_lean': 39,
-              'rating_threshold_buy_treasury': 70}
+              'rating_threshold_buy_treasury': 70,
+              # Pinned too, so the LEAN assertion tests precedence rather
+              # than whatever lean cut the last calibration wrote to config.
+              'rating_threshold_lean_treasury': 60}
     assert rating_from_composite(65, params, asset_class='AGENCY') == 'BUY'
     assert rating_from_composite(65, params, asset_class='TREASURY') == 'LEAN BUY'
     assert rating_from_composite(72, params, asset_class='TREASURY') == 'BUY'
