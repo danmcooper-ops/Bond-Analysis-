@@ -184,6 +184,26 @@ not from this code:
   now forbids altering commands. When a step's command changes, run the task
   once by hand and choose always-allow for each step.
 
+### Moving the run to another Mac
+
+The MacBook skipped every weekday it was asleep at 07:00 (10-12..10-15), so
+the run is moving to the always-on Mac mini. What has to move is only what git
+cannot carry: `output/` and `data/cache/` (~1 GB), the `.env` values, and the
+task itself. The equity snapshots do **not** have to move: the daily run never
+opens one (they are baked into `universe_<quarter>.parquet` at build time).
+
+1. Target: clone to the same path, then `scheduling/setup_mini.sh`. It builds
+   the venv, runs the tests, checks `gh`, `.env`, data and power settings, and
+   prints what is left. Re-run it until it exits 0.
+2. Target: `scripts/set_fred_key.sh`, plus `SEC_USER_AGENT=` in `.env`.
+3. Old machine: pause the task in the app and remove
+   `~/.claude/scheduled-tasks/daily-bond-analysis` (two publishers have
+   happened before), then `ssh-copy-id <target>` once and
+   `scheduling/push_to_mini.sh <target> --go`.
+4. Target: create the task from `scheduling/daily-bond-analysis.SKILL.md`
+   (weekdays 07:00, working folder = the repo), add Claude to Login Items, and
+   "Run now" once while watching to approve each command.
+
 When `daily_checks.py gaps` reports a missed run, grep
 `~/Library/Logs/Claude/main.log` for `daily-bond-analysis` around 07:00 of that
 day before suspecting the pipeline.
@@ -203,6 +223,7 @@ Then, reviewing each report before applying the next step:
 
 ```bash
 python scripts/ingest_nport.py --quarter 2026q3     # ~5 min from cache; downloads ~440 MB otherwise
+python scripts/fetch_equity_snapshot.py --as-of 2026-09-30   # the quarter's newest mark date
 python scripts/build_universe.py --quarter 2026q3
 python scripts/fit_term_structure.py                 # review, then --apply
 python scripts/analyze_bonds.py
