@@ -10,6 +10,8 @@
 set -uo pipefail
 
 repo="$(cd "$(dirname "$0")/.." && pwd)"
+# A non-login SSH shell does not have Homebrew on PATH.
+export PATH="/opt/homebrew/bin:$PATH"
 py="$repo/.venv/bin/python"
 fail=0
 ok()   { echo "  ok    $*"; }
