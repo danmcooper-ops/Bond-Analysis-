@@ -1,0 +1,45 @@
+# Publishes the report to GitHub Pages.
+#
+# Always builds from the `pages-live` branch, never from main, even when
+# dispatched manually. That branch holds ONE amended commit containing only
+# docs/, and scripts/publish.py force-pushes over it each run.
+#
+# The reason is size. The report is ~2.3 MB and regenerates daily; committed
+# normally to main that is ~800 MB a year of history nobody will ever read,
+# and the sibling equity model already hit exactly that wall. Amending a
+# single commit keeps the published branch at one report's worth forever.
+name: Deploy report to Pages
+
+on:
+  push:
+    branches: [pages-live]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Never let two publishes race; the newer report always wins.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: pages-live
+      - uses: actions/configure-pages@v5
+        with:
+          enablement: true
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs
+      - id: deployment
+        uses: actions/deploy-pages@v4
