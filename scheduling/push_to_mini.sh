@@ -1,8 +1,8 @@
 #!/bin/bash
 # Copy the bond model's git-ignored state from this machine to another Mac.
 #
-#   scheduling/push_to_mini.sh Dans-Mac-Mini.local            # dry run
-#   scheduling/push_to_mini.sh Dans-Mac-Mini.local --go       # copy
+#   scheduling/push_to_mini.sh dmcooper@Dans-Mac-Mini.local          # dry run
+#   scheduling/push_to_mini.sh dmcooper@Dans-Mac-Mini.local --go     # copy
 #
 # Moves only what git cannot: output/ (the snapshot corpus, the built
 # universe, the calibration files) and data/cache/ (N-PORT, SEC, Treasury,
@@ -11,14 +11,17 @@
 # whose shebangs pin this machine's paths.
 #
 # Needs passwordless SSH to the target (ssh-copy-id once) and the repo already
-# cloned there at the same path. Run it AFTER the last run on this machine and
-# BEFORE the target's first, with this machine's scheduled task disabled.
+# cloned there at the same path relative to that account's home (the mini's
+# account is dmcooper, not danmcooper; REMOTE_REPO overrides). Safe to run
+# early and again at cutover: rsync only sends what changed. The final pass
+# goes AFTER the last run here, with this machine's scheduled task disabled.
 set -euo pipefail
 
-host="${1:?usage: $0 <host> [--go]}"
+host="${1:?usage: $0 <user@host> [--go]}"
 go="${2:-}"
 repo="$(cd "$(dirname "$0")/.." && pwd)"
-remote_repo="${REMOTE_REPO:-$repo}"
+# Relative paths on the remote side resolve against its home directory.
+remote_repo="${REMOTE_REPO:-${repo#"$HOME"/}}"
 
 if pgrep -f analyze_bonds.py >/dev/null; then
     echo "analyze_bonds.py is running here; wait for it to finish" >&2
