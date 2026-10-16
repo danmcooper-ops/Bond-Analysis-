@@ -73,9 +73,9 @@ if [ -x "$py" ]; then
 fi
 
 echo "== machine"
-[ "$(pmset -g | awk '/ sleep /{print $2}')" = "0" ] && ok "system sleep off" \
+[ "$(pmset -g | awk '$1=="sleep"{print $2}')" = "0" ] && ok "system sleep off" \
     || bad "System Settings > Energy: prevent automatic sleeping"
-[ "$(pmset -g | awk '/autorestart/{print $2}')" = "1" ] && ok "restart after power failure" \
+[ "$(pmset -g | awk '$1=="autorestart"{print $2}')" = "1" ] && ok "restart after power failure" \
     || bad "System Settings > Energy: start up after a power failure"
 [ -d /Applications/Claude.app ] && ok "Claude.app installed" || bad "install the Claude desktop app"
 
