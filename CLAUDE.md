@@ -146,9 +146,17 @@ Pipeline (see the plan for the full milestone sequence):
 python scripts/ingest_nport.py --quarter 2026q1        # monthly, 30-90 min; prunes older ~440 MB ZIPs whose marks exist
 python scripts/build_universe.py --month 2026-06
 python scripts/analyze_bonds.py --as-of 2026-08-06     # daily, 5-15 min
-python scripts/report_html.py                          # render the HTML page
+python scripts/report_html.py                          # render the HTML page + bond_report_<date>.json
 python scripts/publish.py                              # amend + force-push pages-live
 ```
+
+`report_html.py` also writes `output/bond_report_<date>.json`: the page's
+content as data (tiles, caveats, distributions, chart points, the table),
+built by `report_data`, the same function the page is drawn from. The equity
+model's report reads the newest one on or before its own run date from this
+sibling `output/` and draws it as Financial Model › Bond Valuations, in its
+own styling; that tab is meant to replace this page. It is a file contract,
+not a code dependency: bump `REPORT_DATA_VERSION` on any change of shape.
 
 ## Conventions
 

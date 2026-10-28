@@ -19,6 +19,11 @@ comes from free data with a monthly, ~60-day-lagged price; the credit signal
 is unvalidated; and roughly four fifths of rows carry a rating cap. Those
 facts sit at the top of the page, not in a footnote, because a clean-looking
 table of BUY ratings invites more confidence than this model has earned.
+
+Beside the page, every render writes ``bond_report_<date>.json``: the same
+content as data (tiles, caveats, distributions, chart points, the table), so
+another report can draw this one in its own style without re-deriving any of
+it. ``report_data`` is the single source for both, so they cannot drift.
 """
 
 import argparse
@@ -314,11 +319,35 @@ def _svg_bars(items, width=460, height=190, pad=38, colour='#4f7fd1'):
     return ''.join(parts)
 
 
-def curve_chart(meta):
+def curve_points(meta):
+    """``[(years, par yield)]`` for today's Treasury par curve, shortest first."""
     from models.curve import TENOR_YEARS
     par = (meta or {}).get('par_curve') or {}
-    points = sorted((TENOR_YEARS[k], v) for k, v in par.items()
-                    if k in TENOR_YEARS and v is not None)
+    return sorted((TENOR_YEARS[k], v) for k, v in par.items()
+                  if k in TENOR_YEARS and v is not None)
+
+
+# FRED's published IG maturity slices, as multiples of the five-year level.
+FRED_TERM_SLICES = [(2.0, 0.59), (4.0, 0.86), (6.0, 1.03), (8.5, 1.22),
+                    (12.5, 1.18), (20.0, 1.27)]
+
+
+def term_series(term):
+    """The fitted term factors per credit tier, then FRED's slices:
+    ``[{name, points}]``, or ``[]`` with no fitted term structure."""
+    if not term:
+        return []
+    series = []
+    for tier, payload in (term.get('by_tier') or {}).items():
+        pts = [(t, f) for t, f in payload.get('points', [])]
+        if pts:
+            series.append({'name': tier, 'points': pts})
+    series.append({'name': 'FRED slices', 'points': FRED_TERM_SLICES})
+    return series
+
+
+def curve_chart(meta):
+    points = curve_points(meta)
     if not points:
         return '<p class="muted">no curve</p>'
     return _svg_line_chart(
@@ -328,18 +357,13 @@ def curve_chart(meta):
 
 def term_chart(term):
     """Fitted term factors per credit tier, against FRED's published slices."""
-    if not term:
+    series = term_series(term)
+    if not series:
         return '<p class="muted">no fitted term structure</p>'
-    colours = {'tight': '#3f9d6b', 'mid': '#4f7fd1', 'wide': '#c96a3f'}
-    series = []
-    for tier, payload in (term.get('by_tier') or {}).items():
-        pts = [(t, f) for t, f in payload.get('points', [])]
-        if pts:
-            series.append({'name': tier, 'colour': colours.get(tier, '#888'),
-                           'points': pts})
-    fred = [(2.0, 0.59), (4.0, 0.86), (6.0, 1.03), (8.5, 1.22),
-            (12.5, 1.18), (20.0, 1.27)]
-    series.append({'name': 'FRED slices', 'colour': '#9aa0a6', 'points': fred})
+    colours = {'tight': '#3f9d6b', 'mid': '#4f7fd1', 'wide': '#c96a3f',
+               'FRED slices': '#9aa0a6'}
+    for s in series:
+        s['colour'] = colours.get(s['name'], '#888')
     return _svg_line_chart(series, y_fmt='x', x_label='years to maturity')
 
 
@@ -457,32 +481,18 @@ h2[data-tip]::after {{ content:" \24D8"; opacity:.4; font-size:12px; }}
 
 <div class="panel caveat">
 <h2>What this is, and what it is not</h2>
-<ul>
-<li><strong>Prices are monthly and about {mark_age} days old.</strong> They come from
-SEC Form N-PORT fund holdings, the only free per-CUSIP source. Every price shown is
-that mark aged onto today's curve — an estimate, never a quote.</li>
-<li><strong>The ratings themselves do not yet predict returns.</strong> In a point-in-time
-backtest over 11 months (run 2026-09-14), BUY and LEAN BUY did <em>not</em> beat HOLD and PASS
-(positive in only 5 of 11 months). What did hold up is relative value: the cheapest fifth by
-spread mispricing beat the richest by ~26bp of monthly excess return in 10 of 11 months. Sort
-by the Mispr column, and read the rating as a data-quality-aware summary, not a forecast.</li>
-<li><strong>{capped_pct}% of rows carry a rating cap</strong> — mostly because the issuer
-could not be identified. A capped row still shows its uncapped rating; the cap says the
-data does not support acting on it.</li>
-<li><strong>No agency ratings, no true OAS, no covenants.</strong> Z-spread stands in for
-OAS, so callable bonds priced above par are systematically overstated and are capped.</li>
-</ul>
+<ul>{caveats}</ul>
 </div>
 
 <div class="grid">
-  <div class="panel"><h2 data-tip="Thresholds are calibrated per asset class against each class own score distribution, so BUY means roughly the top 3% of that class rather than an absolute standard.">Rating distribution</h2><div class="dist">{rating_dist}</div></div>
-  <div class="panel"><h2 data-tip="The model own credit view, from a six-factor scorecard. Cutpoints are matched to the mix the bond market itself prices, so the shape here should resemble the real corporate universe.">Implied credit bucket</h2><div class="dist">{bucket_dist}</div></div>
-  <div class="panel"><h2 data-tip="Today par yield curve from home.treasury.gov, bootstrapped to zero rates and used to discount every cashflow in the model.">Treasury par curve</h2>{curve_svg}</div>
-  <div class="panel"><h2 data-tip="How much wider a spread should be at each maturity, as a multiple of the five-year level. Fitted from about 130,000 observed spreads; FRED published slices stop at 15 years and overstate the long end by up to 17%.">Spread term structure, fitted vs FRED</h2>{term_svg}
+  <div class="panel"><h2 data-tip="{tip_ratings}">Rating distribution</h2><div class="dist">{rating_dist}</div></div>
+  <div class="panel"><h2 data-tip="{tip_buckets}">Implied credit bucket</h2><div class="dist">{bucket_dist}</div></div>
+  <div class="panel"><h2 data-tip="{tip_curve}">Treasury par curve</h2>{curve_svg}</div>
+  <div class="panel"><h2 data-tip="{tip_term}">Spread term structure, fitted vs FRED</h2>{term_svg}
     <p class="muted" style="font-size:12px;margin:8px 0 0">Fitted from ~130,000 observed
-    spreads. Wide credits <em>invert</em> — distressed risk sits in near-dated paper.</p></div>
-  <div class="panel"><h2 data-tip="Caps lower a rating when the evidence does not support acting on it. The dominant reason is an unidentified issuer, which is a coverage limit rather than a judgement on the bond.">Why rows are capped</h2>{cap_svg}</div>
-  <div class="panel"><h2 data-tip="Average score in each of the five categories, over the rows where that category applied at all. A category that cannot describe an instrument drops out of its composite entirely rather than scoring zero.">Mean score by category</h2>{cat_svg}
+    spreads. Wide credits invert — distressed risk sits in near-dated paper.</p></div>
+  <div class="panel"><h2 data-tip="{tip_caps}">Why rows are capped</h2>{cap_svg}</div>
+  <div class="panel"><h2 data-tip="{tip_categories}">Mean score by category</h2>{cat_svg}
     <p class="muted" style="font-size:12px;margin:8px 0 0">A category absent from a row
     was structurally inapplicable — a Treasury has no issuer balance sheet — and drops
     out of that row's composite rather than scoring zero.</p></div>
@@ -724,17 +734,56 @@ def vintage_banner(meta):
             f'price here leans harder on the curve overlay.</p></div>')
 
 
-def render(rows, meta, term, path):
-    payload = build_payload(rows)
+SECTION_TIPS = {'ratings': 'Thresholds are calibrated per asset class against each class own score distribution, so BUY means roughly the top 3% of that class rather than an absolute standard.', 'buckets': 'The model own credit view, from a six-factor scorecard. Cutpoints are matched to the mix the bond market itself prices, so the shape here should resemble the real corporate universe.', 'curve': 'Today par yield curve from home.treasury.gov, bootstrapped to zero rates and used to discount every cashflow in the model.', 'term': 'How much wider a spread should be at each maturity, as a multiple of the five-year level. Fitted from about 130,000 observed spreads; FRED published slices stop at 15 years and overstate the long end by up to 17%.', 'caps': 'Caps lower a rating when the evidence does not support acting on it. The dominant reason is an unidentified issuer, which is a coverage limit rather than a judgement on the bond.', 'categories': 'Average score in each of the five categories, over the rows where that category applied at all. A category that cannot describe an instrument drops out of its composite entirely rather than scoring zero.'}
 
-    ratings = payload['ratings']
+TERM_NOTE = ('Fitted from ~130,000 observed spreads. Wide credits invert — '
+             'distressed risk sits in near-dated paper.')
+CATEGORY_NOTE = ("A category absent from a row was structurally inapplicable "
+                 "— a Treasury has no issuer balance sheet — and drops out of "
+                 "that row's composite rather than scoring zero.")
+SOURCES = ('SEC Form N-PORT, US Treasury, FRED, TreasuryDirect, SEC XBRL. '
+           'Free data only.')
+
+
+def _caveats(mark_age, capped_pct):
+    """``[(lead, rest)]``: the page's "what this is, and what it is not"."""
+    return [
+        (f'Prices are monthly and about {mark_age} days old.',
+         "They come from SEC Form N-PORT fund holdings, the only free per-CUSIP "
+         "source. Every price shown is that mark aged onto today's curve — an "
+         "estimate, never a quote."),
+        ('The ratings themselves do not yet predict returns.',
+         'In a point-in-time backtest over 11 months (run 2026-09-14), BUY and '
+         'LEAN BUY did not beat HOLD and PASS (positive in only 5 of 11 '
+         'months). What did hold up is relative value: the cheapest fifth by '
+         'spread mispricing beat the richest by ~26bp of monthly excess return '
+         'in 10 of 11 months. Sort by the Mispr column, and read the rating as '
+         'a data-quality-aware summary, not a forecast.'),
+        (f'{capped_pct}% of rows carry a rating cap',
+         '— mostly because the issuer could not be identified. A capped row '
+         'still shows its uncapped rating; the cap says the data does not '
+         'support acting on it.'),
+        ('No agency ratings, no true OAS, no covenants.',
+         'Z-spread stands in for OAS, so callable bonds priced above par are '
+         'systematically overstated and are capped.'),
+    ]
+
+
+def _summary(rows, payload):
+    """``(capped_pct, median mark age in days)``."""
     total = payload['total']
     capped_pct = round(100.0 * payload['capped'] / total) if total else 0
     mark_ages = [r.get('mark_age_days') for r in rows
                  if r.get('mark_age_days') is not None]
     mark_age = int(sorted(mark_ages)[len(mark_ages) // 2]) if mark_ages else 0
+    return capped_pct, mark_age
 
-    card_specs = [
+
+def _cards(payload, capped_pct, mark_age):
+    """``[(label, value, tooltip)]`` for the headline tiles."""
+    ratings = payload['ratings']
+    total = payload['total']
+    return [
         ('Instruments', f'{total:,}',
          'Every US Treasury and corporate bond the model could price: held by '
          'at least two reporting funds, at least $10m in aggregate, and more '
@@ -764,6 +813,69 @@ def render(rows, meta, term, path):
          'model, not a failure. Every price here is that mark aged onto '
          "today's curve."),
     ]
+
+
+BUCKET_ORDER = ['AAA', 'AA', 'A', 'BBB', 'BB', 'B', 'CCC']
+RATING_ORDER = ['BUY', 'LEAN BUY', 'HOLD', 'PASS']
+REPORT_DATA_VERSION = 1
+
+
+def report_data(rows, meta, term, payload=None):
+    """The page as data: what ``render`` draws, for another report to draw in
+    its own style. Plain JSON types throughout (the table rows are already
+    cleaned by ``build_payload``)."""
+    payload = payload or build_payload(rows)
+    capped_pct, mark_age = _summary(rows, payload)
+    meta = meta or {}
+    age = meta.get('data_vintage_age_days')
+    return {
+        'version': REPORT_DATA_VERSION,
+        'run_date': meta.get('run_date', ''),
+        'curve_date': meta.get('curve_date', ''),
+        'generated': datetime.now().strftime('%Y-%m-%d %H:%M'),
+        'total': payload['total'],
+        'capped_pct': capped_pct,
+        'mark_age': mark_age,
+        'vintage': ({'date': meta.get('data_vintage'), 'age_days': age}
+                    if age is not None and age > VINTAGE_WARN_DAYS else None),
+        'cards': [{'k': k, 'v': v, 't': t}
+                  for k, v, t in _cards(payload, capped_pct, mark_age)],
+        'caveats': [{'lead': a, 'text': b}
+                    for a, b in _caveats(mark_age, capped_pct)],
+        'ratings': [[k, payload['ratings'][k]] for k in RATING_ORDER
+                    if k in payload['ratings']],
+        'buckets': [[k, payload['buckets'][k]] for k in BUCKET_ORDER
+                    if k in payload['buckets']],
+        'bucket_tips': BUCKET_TIPS,
+        'curve': [list(p) for p in curve_points(meta)],
+        'term': [{'name': s['name'], 'points': [list(p) for p in s['points']]}
+                 for s in term_series(term)],
+        'cap_reasons': [list(c) for c in payload['capReasons']],
+        'categories': payload['categories'],
+        'tips': SECTION_TIPS,
+        'notes': {'term': TERM_NOTE, 'categories': CATEGORY_NOTE},
+        'sources': SOURCES,
+        'columns': payload['columns'],
+        'rows': payload['rows'],
+    }
+
+
+def write_report_data(data, path):
+    """Write ``data`` atomically as compact JSON."""
+    tmp = path + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as fh:
+        json.dump(data, fh, separators=(',', ':'), allow_nan=False)
+    os.replace(tmp, path)
+    return path
+
+
+def render(rows, meta, term, path, data_path=None):
+    """Write the HTML page to ``path`` and its content as data to
+    ``data_path`` (default ``bond_report_<run date>.json`` beside it)."""
+    payload = build_payload(rows)
+    total = payload['total']
+    capped_pct, mark_age = _summary(rows, payload)
+    card_specs = _cards(payload, capped_pct, mark_age)
     cards = ''.join(
         f'<div class="card" data-tip="{tip.replace(chr(34), chr(39))}">'
         f'<div class="v">{v}</div><div class="k">{k}</div></div>'
@@ -772,9 +884,10 @@ def render(rows, meta, term, path):
     classes = payload['classes']
     class_opts = ''.join(f'<option value="{c}">{c}</option>'
                          for c in sorted(classes))
-    bucket_order = ['AAA', 'AA', 'A', 'BBB', 'BB', 'B', 'CCC']
     bucket_opts = ''.join(f'<option value="{b}">{b}</option>'
-                          for b in bucket_order if b in payload['buckets'])
+                          for b in BUCKET_ORDER if b in payload['buckets'])
+    caveats = ''.join(f'<li><strong>{a}</strong> {b}</li>'
+                      for a, b in _caveats(mark_age, capped_pct))
 
     cap_svg = _svg_bars([(r[:26], n) for r, n in payload['capReasons']],
                         colour='#a8621b')
@@ -788,8 +901,10 @@ def render(rows, meta, term, path):
         cards=cards,
         capped_pct=capped_pct,
         mark_age=mark_age,
-        rating_dist=_dist_rows(ratings, ['BUY', 'LEAN BUY', 'HOLD', 'PASS'], total),
-        bucket_dist=_dist_rows(payload['buckets'], bucket_order),
+        rating_dist=_dist_rows(payload['ratings'], RATING_ORDER, total),
+        bucket_dist=_dist_rows(payload['buckets'], BUCKET_ORDER),
+        caveats=caveats,
+        **{f'tip_{k}': v for k, v in SECTION_TIPS.items()},
         curve_svg=curve_chart(meta),
         term_svg=term_chart(term),
         cap_svg=cap_svg,
@@ -804,6 +919,12 @@ def render(rows, meta, term, path):
     size = os.path.getsize(path) / 1e6
     log.info('Wrote %s (%.1f MB, %d instruments)', os.path.basename(path),
              size, total)
+    if data_path is None:
+        stamp = (meta or {}).get('run_date') or date.today().isoformat()
+        data_path = os.path.join(os.path.dirname(os.path.abspath(path)),
+                                 f'bond_report_{stamp}.json')
+    write_report_data(report_data(rows, meta, term, payload), data_path)
+    log.info('Wrote %s', os.path.basename(data_path))
     return path
 
 
