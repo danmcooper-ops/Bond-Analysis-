@@ -231,7 +231,7 @@ Then, reviewing each report before applying the next step:
 
 ```bash
 python scripts/ingest_nport.py --quarter 2026q3     # ~5 min from cache; downloads ~440 MB otherwise
-python scripts/fetch_equity_snapshot.py --as-of 2026-09-30   # the quarter's newest mark date
+python scripts/fetch_equity_snapshot.py --as-of 2026-07-31   # once per corporate mark date, see below
 python scripts/build_universe.py --quarter 2026q3
 python scripts/fit_term_structure.py                 # review, then --apply
 python scripts/analyze_bonds.py
@@ -240,6 +240,17 @@ python scripts/analyze_bonds.py
 python scripts/calibrate_thresholds.py output/results_<today>.parquet  # review, then --apply
 python scripts/analyze_bonds.py
 ```
+
+**Equity snapshots for the build.** `.env` sets `EQUITY_SNAPSHOT_DIR` to
+`data/cache/equity_snapshots/` (git-ignored; moves with `data/cache/`). Check it
+before each quarter: until 2026-11-10 it held a placeholder path that did not
+exist, and a build against a missing directory drops every issuer's credit
+gates without failing. Each row reads fundamentals as of its *own* mark date,
+so fetch one snapshot per distinct corporate `report_date` in
+`data/cache/nport/<quarter>_marks.parquet`, not only the newest. For 2026q3
+that was 2026-07-31, 2026-06-30 and 2026-05-31 (the script takes the newest
+snapshot on or before each). The quarter's calendar end (2026-09-30) is the
+wrong date: it postdates every mark and is never read.
 
 `calibrate_credit --apply` refuses cutpoints whose buckets do not widen in
 spread; if it refuses, investigate the scorecard rather than forcing it.
