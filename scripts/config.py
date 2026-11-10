@@ -99,12 +99,12 @@ CREDIT_BUCKETS = ('AAA', 'AA', 'A', 'BBB', 'BB', 'B', 'CCC')
 # Score cutpoints, high to low. Written by scripts/calibrate_credit.py: they are
 # the credit-score quantiles that reproduce INDEX_RATING_MIX, subject to each
 # bucket's median observed spread widening from AAA to CCC.
-CREDIT_CUT_AAA = 99.0
-CREDIT_CUT_AA = 82.1
-CREDIT_CUT_A = 51.9
-CREDIT_CUT_BBB = 33.2
-CREDIT_CUT_BB = 23.4
-CREDIT_CUT_B = 11.9
+CREDIT_CUT_AAA = 99.4
+CREDIT_CUT_AA = 85.0
+CREDIT_CUT_A = 56.9
+CREDIT_CUT_BBB = 36.1
+CREDIT_CUT_BB = 26.0
+CREDIT_CUT_B = 11.3
 
 # The rating mix the cutpoints reproduce. EXTERNAL on purpose: the previous
 # target was the model's own market_bucket counts, which came from anchors

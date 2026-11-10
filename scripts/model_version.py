@@ -19,6 +19,8 @@ gates, caps, scoring, calibration method — and note it below.
                     index rating mix with a spread-order guard, issuer-floored
                     anchors, derived CCC anchor, geometric market buckets.
     2026.09.15      Altman Z distress cap no longer applied to financials.
+    2026.11.10      credit cutpoints and bucket anchors recalibrated on the
+                    2026q3 universe (N-PORT marks to 2026-07-31).
 """
 
 import hashlib
@@ -26,7 +28,7 @@ import json
 import os
 import subprocess
 
-MODEL_VERSION = '2026.09.15'
+MODEL_VERSION = '2026.11.10'
 LEGACY_VERSION = 'pre-2026.09.13'
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
