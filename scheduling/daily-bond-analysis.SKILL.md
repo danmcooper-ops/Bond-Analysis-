@@ -76,11 +76,18 @@ PYTHON="$HOME/Projects/bond-analysis-model/.venv/bin/python"; SSL_CERT_FILE=$("$
 ```
 If it reports a published-but-not-ingested quarter or an old data vintage, surface it prominently. Do NOT ingest — that is a manual 30–90 minute job for the user.
 
+## Step 6 — Price history (report-only)
+```
+PYTHON="$HOME/Projects/bond-analysis-model/.venv/bin/python"; SSL_CERT_FILE=$("$PYTHON" -m certifi 2>/dev/null) && export SSL_CERT_FILE; cd "$HOME/Projects/bond-analysis-model"; "$PYTHON" scripts/build_price_history.py
+```
+Rebuilds `output/history/` (monthly N-PORT marks, daily FedInvest Treasury prices, daily modelled estimates including today's) and fetches only FedInvest days not yet cached. Include its three summary lines in the run summary. A FedInvest failure is report-only: the next run retries the missing days.
+
 ## Success criteria
 - `output/results_RUN_DATE.parquet` and `run_meta_RUN_DATE.json` exist (the accumulating snapshot corpus — the long-term point of the daily run)
 - `output/bond_analysis_RUN_DATE.html` was rendered
+- `output/history/` was rebuilt, or Step 6's failure is reported
 - The Pages deploy ran with a NEW run id and succeeded, or its failure (or "unchanged") is clearly reported
-- The run summary includes: curve date used, instrument count, rating mix per asset class, all ALERT lines from Steps 0/4/5, any FRED-key or equity-snapshot warnings
+- The run summary includes: curve date used, instrument count, rating mix per asset class, all ALERT lines from Steps 0/4/5, the Step 6 history summary lines, any FRED-key or equity-snapshot warnings
 
 ## Notes
 - The live report is at https://danmcooper-ops.github.io/Bond-Analysis-/
