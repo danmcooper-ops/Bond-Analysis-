@@ -51,6 +51,7 @@ same convention as the equity model.
 | **home.treasury.gov** par yield curve XML | full-tenor daily par curve | daily, T+1, no key |
 | **FRED** | `DGS*` constant-maturity yields; ICE BofA OAS by rating bucket; IG maturity slices for the spread term structure | daily, free key (keyless `fredgraph.csv` fallback) |
 | **TreasuryDirect** | exact coupon/maturity per Treasury CUSIP | weekly refresh, no key |
+| **TreasuryDirect FedInvest** | observed end-of-day price (buy/sell/EOD) for every marketable Treasury; price history only, the model does not read it | daily, history to 2008+, CSRF form, no key |
 | **SEC XBRL / equity snapshot** | issuer fundamentals for the credit scorecard | quarterly filings |
 | **yfinance** | bond ETF total-return benchmarks | daily |
 
@@ -223,6 +224,30 @@ fingerprints of the calibration files (`scripts/model_version.py`). Bump
 `MODEL_VERSION` whenever a change moves ratings for unchanged inputs, and note
 it in that module's docstring. `daily_checks.py ratings` skips the drift check
 across a version change instead of alerting on the model's own move.
+
+## Price history
+
+`scripts/build_price_history.py` rebuilds `output/history/` from caches (Step 6
+of the daily task). Each file says in its name whether it is observed or
+modelled, and nothing may blur that line:
+
+| file | kind | source | span |
+|---|---|---|---|
+| `marks_monthly.parquet` | observed, monthly, ~60-day lag | every `data/cache/nport/*_marks.parquet` | whatever quarters are ingested (2019q4 is the first published) |
+| `treasury_daily.parquet` | observed, daily | FedInvest day cache `data/cache/fedinvest/` | 2019-01-01 on (`--since` to go deeper) |
+| `estimates_daily.parquet` | **modelled**, daily | `clean_price_est` from each `output/results_*.parquet` | 2026-08-06 on |
+
+Marks are keyed on calendar **month**, not `report_date`. Funds date one
+month-end two ways (2025-05-30 vs -31), and the odd date often comes from 1-3
+funds. The row with the most funds wins. `--show CUSIP` prints all three
+series for one bond.
+
+**Older quarters are not inert.** `fit_term_structure.py` and `backtest.py`
+read *every* cached marks file. Once 2019q4-2025q2 are ingested for history,
+a refit or backtest spans those years too. That suits the backtest (more
+periods), but the term-structure fit would no longer match the window it was
+calibrated on. Review its diff before `--apply`. The daily run reads only the
+newest quarter, so it is unaffected.
 
 ## New N-PORT quarter
 
